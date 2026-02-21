@@ -12,12 +12,20 @@ const PORT = process.env.PORT || 3000;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-// Health check
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+// Agent mapping: userId -> {name, email}
+// Auto-updated from assignee data on each conversation
+const AGENT_MAP = {
+  1026911: { name: 'Daniel Alonso', email: 'daniel@filmorent.com' },
+  1027747: { name: 'Barush Villarreal', email: 'barush@filmorent.com' },
+  1027751: { name: 'Alfredo Celedon', email: 'alfredo@filmorent.com' },
+  1027755: { name: 'Eddy Manzano', email: 'eddy@filmorent.com' },
+  1027757: { name: 'Diego Tovar', email: 'diego@filmorent.com' },
+  1027820: { name: 'Suheidi Dominguez', email: 'administracion@filmorent.com' }
+};
 
-/**
- * Extract contact ID from Respond.io webhook payload.
- */
+// Health check
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v4' }));
+
 function extractContactId(body) {
   return (
     body?.contact?.id ||
@@ -40,8 +48,47 @@ function extractContactName(body) {
 }
 
 /**
- * Log conversation data to Google Sheets via Apps Script Web App.
+ * Extract all unique agents from outgoing messages + contact assignee.
+ * Returns array of {userId, name, email}
  */
+function extractAgentsFromMessages(messages, assignee) {
+  const agentMap = new Map();
+
+  // First, add assignee if available (this gives us name+email for sure)
+  if (assignee && assignee.id) {
+    const name = ((assignee.firstName || '') + ' ' + (assignee.lastName || '')).trim();
+    agentMap.set(assignee.id, {
+      userId: assignee.id,
+      name: name,
+      email: assignee.email || ''
+    });
+    // Update global mapping
+    if (!AGENT_MAP[assignee.id]) {
+      AGENT_MAP[assignee.id] = { name, email: assignee.email || '' };
+      console.log('New agent discovered: ' + name + ' (ID: ' + assignee.id + ')');
+    }
+  }
+
+  // Then, scan all outgoing messages for unique sender userIds
+  for (const msg of messages) {
+    const traffic = msg.traffic || msg.type;
+    if (traffic === 'outgoing' && msg.sender && msg.sender.userId) {
+      const uid = msg.sender.userId;
+      if (!agentMap.has(uid)) {
+        // Look up in global mapping
+        const known = AGENT_MAP[uid];
+        agentMap.set(uid, {
+          userId: uid,
+          name: known ? known.name : 'Agente #' + uid,
+          email: known ? known.email : ''
+        });
+      }
+    }
+  }
+
+  return Array.from(agentMap.values());
+}
+
 async function logToGoogleSheets(data) {
   if (!GOOGLE_SHEETS_URL) {
     console.log('Google Sheets URL not configured, skipping log.');
@@ -66,7 +113,6 @@ async function logToGoogleSheets(data) {
 
 app.post('/webhook/conversation-closed', async (req, res) => {
   console.log('\n[' + new Date().toISOString() + '] === WEBHOOK RECEIVED ===');
-  console.log('Headers:', JSON.stringify(req.headers, null, 2));
   console.log('Body:', JSON.stringify(req.body, null, 2));
 
   res.json({ received: true });
@@ -82,19 +128,31 @@ app.post('/webhook/conversation-closed', async (req, res) => {
   console.log('Analyzing conversation for contact: ' + contactId + ' (' + contactName + ')');
 
   try {
-    const messagesResponse = await fetch(
-      'https://api.respond.io/v2/contact/id:' + contactId + '/message/list?limit=50',
-      {
-        headers: {
-          'Authorization': 'Bearer ' + RESPONDIO_API_KEY,
-          'Content-Type': 'application/json'
+    // Fetch messages and contact info in parallel
+    const [messagesResponse, contactResponse] = await Promise.all([
+      fetch(
+        'https://api.respond.io/v2/contact/id:' + contactId + '/message/list?limit=50',
+        {
+          headers: {
+            'Authorization': 'Bearer ' + RESPONDIO_API_KEY,
+            'Content-Type': 'application/json'
+          }
         }
-      }
-    );
+      ),
+      fetch(
+        'https://api.respond.io/v2/contact/id:' + contactId,
+        {
+          headers: {
+            'Authorization': 'Bearer ' + RESPONDIO_API_KEY,
+            'Content-Type': 'application/json'
+          }
+        }
+      )
+    ]);
 
     if (!messagesResponse.ok) {
       const errorText = await messagesResponse.text();
-      console.error('Respond.io API error: ' + messagesResponse.status + ' - ' + errorText);
+      console.error('Respond.io messages API error: ' + messagesResponse.status + ' - ' + errorText);
       return;
     }
 
@@ -106,13 +164,33 @@ app.post('/webhook/conversation-closed', async (req, res) => {
       return;
     }
 
+    // Get assignee from contact data
+    let assignee = null;
+    if (contactResponse.ok) {
+      const contactData = await contactResponse.json();
+      assignee = contactData.assignee || null;
+    }
+
+    // Extract all agents who participated
+    const agents = extractAgentsFromMessages(messages, assignee);
+    const agentNames = agents.map(a => a.name).join(', ');
+    const agentEmails = agents.map(a => a.email).filter(e => e).join(', ');
+    console.log('Agents detected: ' + agentNames);
+
+    // Format messages for analysis - now include agent name when possible
     const formattedMessages = messages.map(msg => {
-      const sender = msg.type === 'incoming' ? 'CLIENTE' : 'AGENTE';
-      const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
-      return sender + ': ' + text;
+      const traffic = msg.traffic || msg.type;
+      if (traffic === 'incoming') {
+        const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
+        return 'CLIENTE: ' + text;
+      } else {
+        const uid = msg.sender?.userId;
+        const agentInfo = uid && AGENT_MAP[uid] ? AGENT_MAP[uid].name : 'AGENTE';
+        const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
+        return agentInfo + ': ' + text;
+      }
     }).join('\n');
 
-    // Detect channel from first message
     const channel = messages[0]?.channelType || messages[0]?.channel || 'desconocido';
     const link = 'https://app.respond.io/space/379868/inbox/' + contactId;
 
@@ -124,7 +202,9 @@ TAGS A EVALUAR:
 3. "incidencia" - Problema, queja, equipo dañado, entrega tarde, cobro incorrecto.
 4. "renta-perdida" - Cliente queria rentar pero NO se concreto. Causa: "precio", "sin_respuesta_cliente", "tardanza_respuesta", "fechas", "ubicacion", "otro".
 
-EVALUACION DEL AGENTE - Califica de 1 a 10 en cada aspecto:
+AGENTES QUE PARTICIPARON: ${agentNames}
+
+EVALUACION DEL AGENTE - Califica de 1 a 10 en cada aspecto. Si hubo multiples agentes, evalua al EQUIPO en general pero menciona a cada agente por nombre en el feedback:
 - tiempo_respuesta: Respondio rapido o tardo mucho? (10=inmediato, 1=horas/dias sin responder)
 - conocimiento_producto: Conoce bien el catalogo y specs del equipo? (10=experto, 1=no sabe)
 - alternativas_ofrecidas: Ofrecio alternativas cuando algo no estaba disponible? (10=multiples opciones relevantes, 1=no ofrecio nada)
@@ -150,7 +230,7 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
     "trato_cliente": 8,
     "cierre_venta": 7,
     "calificacion_general": 7.5,
-    "feedback": "Que hizo bien y que puede mejorar el agente, siendo especifico con ejemplos de la conversacion",
+    "feedback": "Que hizo bien y que puede mejorar cada agente, siendo especifico con ejemplos de la conversacion. Menciona a cada agente por nombre.",
     "recomendaciones": ["Recomendacion especifica 1", "Recomendacion especifica 2"]
   }
 }`;
@@ -197,7 +277,6 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
     const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'renta-perdida'];
     tagsToApply = tagsToApply.filter(tag => validTags.includes(tag));
 
-    // If renta-perdida detected, add the cause as a sub-tag
     if (tagsToApply.includes('renta-perdida') && causaRentaPerdida) {
       const causeTag = 'renta-perdida:' + causaRentaPerdida;
       tagsToApply.push(causeTag);
@@ -227,7 +306,7 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
       console.log('No tags to apply');
     }
 
-    // Log to Google Sheets with all v3 data
+    // Log to Google Sheets with agent data
     await logToGoogleSheets({
       fecha: new Date().toISOString(),
       contactId: contactId,
@@ -241,11 +320,12 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
       conversacion_completa: formattedMessages.substring(0, 45000),
       resultado: resultado,
       equipos_solicitados: equipos,
-      evaluacion_agente: evaluacion
+      evaluacion_agente: evaluacion,
+      agentes: agents.map(a => ({ nombre: a.name, email: a.email, userId: a.userId }))
     });
 
     const calif = evaluacion ? evaluacion.calificacion_general : 'N/A';
-    console.log('=== DONE: contact=' + contactId + ', tags=' + JSON.stringify(tagsToApply) + ', calif=' + calif + '/10 ===\n');
+    console.log('=== DONE: contact=' + contactId + ', agents=' + agentNames + ', calif=' + calif + '/10 ===\n');
 
   } catch (error) {
     console.error('Error:', error.message);
@@ -253,5 +333,5 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
 });
 
 app.listen(PORT, () => {
-  console.log('Filmorent Tag Analyzer v3 running on port ' + PORT);
+  console.log('Filmorent Tag Analyzer v4 running on port ' + PORT);
 });
