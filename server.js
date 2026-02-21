@@ -12,19 +12,20 @@ const PORT = process.env.PORT || 3000;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
-// Agent mapping: userId -> {name, email}
-// Auto-updated from assignee data on each conversation
+// Agent mapping: userId -> {name, email, type}
+// type: "human" for team members, "bot" for AI agents
 const AGENT_MAP = {
-  1026911: { name: 'Daniel Alonso', email: 'daniel@filmorent.com' },
-  1027747: { name: 'Barush Villarreal', email: 'barush@filmorent.com' },
-  1027751: { name: 'Alfredo Celedon', email: 'alfredo@filmorent.com' },
-  1027755: { name: 'Eddy Manzano', email: 'eddy@filmorent.com' },
-  1027757: { name: 'Diego Tovar', email: 'diego@filmorent.com' },
-  1027820: { name: 'Suheidi Dominguez', email: 'administracion@filmorent.com' }
+  1026911: { name: 'Daniel Alonso', email: 'daniel@filmorent.com', type: 'human' },
+  1027747: { name: 'Barush Villarreal', email: 'barush@filmorent.com', type: 'human' },
+  1027751: { name: 'Alfredo Celedon', email: 'alfredo@filmorent.com', type: 'human' },
+  1027755: { name: 'Eddy Manzano', email: 'eddy@filmorent.com', type: 'human' },
+  1027757: { name: 'Diego Tovar', email: 'diego@filmorent.com', type: 'human' },
+  1027820: { name: 'Suheidi Dominguez', email: 'administracion@filmorent.com', type: 'human' },
+  1028000: { name: 'Filmorent Assistant', email: '', type: 'bot' }
 };
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v4' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v5' }));
 
 function extractContactId(body) {
   return (
@@ -48,45 +49,80 @@ function extractContactName(body) {
 }
 
 /**
- * Extract all unique agents from outgoing messages + contact assignee.
- * Returns array of {userId, name, email}
+ * Extract agents who ACTUALLY SENT messages in the conversation.
+ * Uses sender.source to distinguish:
+ *   - "user" = human agent (with userId identifying who)
+ *   - "ai_agent" = bot/virtual agent
+ *
+ * IMPORTANT: Does NOT include assignee unless they actually sent a message.
+ * This fixes the bug where the assigned agent was listed even if they never responded.
+ *
+ * Returns: { humans: [{userId, name, email}], bots: [{userId, name}], all: [{userId, name, email, type}] }
  */
-function extractAgentsFromMessages(messages, assignee) {
-  const agentMap = new Map();
+function extractAgentsFromMessages(messages) {
+  const humanAgents = new Map();
+  const botAgents = new Map();
 
-  // First, add assignee if available (this gives us name+email for sure)
-  if (assignee && assignee.id) {
-    const name = ((assignee.firstName || '') + ' ' + (assignee.lastName || '')).trim();
-    agentMap.set(assignee.id, {
-      userId: assignee.id,
-      name: name,
-      email: assignee.email || ''
-    });
-    // Update global mapping
-    if (!AGENT_MAP[assignee.id]) {
-      AGENT_MAP[assignee.id] = { name, email: assignee.email || '' };
-      console.log('New agent discovered: ' + name + ' (ID: ' + assignee.id + ')');
-    }
-  }
-
-  // Then, scan all outgoing messages for unique sender userIds
   for (const msg of messages) {
     const traffic = msg.traffic || msg.type;
-    if (traffic === 'outgoing' && msg.sender && msg.sender.userId) {
-      const uid = msg.sender.userId;
-      if (!agentMap.has(uid)) {
-        // Look up in global mapping
+    if (traffic !== 'outgoing') continue;
+
+    const sender = msg.sender;
+    if (!sender) continue;
+
+    const uid = sender.userId;
+    const source = sender.source;
+
+    if (source === 'ai_agent') {
+      // Bot/AI agent
+      if (!botAgents.has(uid)) {
         const known = AGENT_MAP[uid];
-        agentMap.set(uid, {
+        botAgents.set(uid, {
+          userId: uid,
+          name: known ? known.name : 'Agente Virtual #' + uid,
+          email: '',
+          type: 'bot'
+        });
+        // Auto-discover new bots
+        if (!AGENT_MAP[uid]) {
+          AGENT_MAP[uid] = { name: 'Agente Virtual #' + uid, email: '', type: 'bot' };
+          console.log('New bot discovered: ID ' + uid);
+        }
+      }
+    } else if (source === 'user' && uid) {
+      // Human agent
+      if (!humanAgents.has(uid)) {
+        const known = AGENT_MAP[uid];
+        humanAgents.set(uid, {
           userId: uid,
           name: known ? known.name : 'Agente #' + uid,
-          email: known ? known.email : ''
+          email: known ? known.email : '',
+          type: 'human'
+        });
+        // Auto-discover new agents
+        if (!AGENT_MAP[uid]) {
+          AGENT_MAP[uid] = { name: 'Agente #' + uid, email: '', type: 'human' };
+          console.log('New agent discovered: ID ' + uid);
+        }
+      }
+    } else if (source === 'workflow') {
+      // Workflow/automation message - treat as bot
+      if (!botAgents.has('workflow')) {
+        botAgents.set('workflow', {
+          userId: 'workflow',
+          name: 'Workflow Automatizado',
+          email: '',
+          type: 'bot'
         });
       }
     }
   }
 
-  return Array.from(agentMap.values());
+  const humans = Array.from(humanAgents.values());
+  const bots = Array.from(botAgents.values());
+  const all = [...bots, ...humans]; // Bots first (usually respond first), then humans
+
+  return { humans, bots, all };
 }
 
 async function logToGoogleSheets(data) {
@@ -164,35 +200,172 @@ app.post('/webhook/conversation-closed', async (req, res) => {
       return;
     }
 
-    // Get assignee from contact data
+    // Get assignee from contact data (for logging only, NOT for agent detection)
     let assignee = null;
     if (contactResponse.ok) {
       const contactData = await contactResponse.json();
       assignee = contactData.assignee || null;
     }
 
-    // Extract all agents who participated
-    const agents = extractAgentsFromMessages(messages, assignee);
-    const agentNames = agents.map(a => a.name).join(', ');
-    const agentEmails = agents.map(a => a.email).filter(e => e).join(', ');
-    console.log('Agents detected: ' + agentNames);
+    // Extract agents who ACTUALLY sent messages (not just assigned)
+    const { humans, bots, all: allAgents } = extractAgentsFromMessages(messages);
+    const humanNames = humans.map(a => a.name).join(', ') || 'Ninguno';
+    const botNames = bots.map(a => a.name).join(', ') || 'Ninguno';
+    const allNames = allAgents.map(a => a.name).join(', ') || 'Sin agente';
+    const agentEmails = humans.map(a => a.email).filter(e => e).join(', ');
 
-    // Format messages for analysis - now include agent name when possible
+    console.log('Agents detected - Humans: ' + humanNames + ' | Bots: ' + botNames);
+    if (assignee) {
+      console.log('Assignee (for reference): ' + assignee.firstName + ' ' + (assignee.lastName || ''));
+    }
+
+    // Format messages for analysis - include agent name and type
     const formattedMessages = messages.map(msg => {
       const traffic = msg.traffic || msg.type;
       if (traffic === 'incoming') {
         const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
         return 'CLIENTE: ' + text;
       } else {
-        const uid = msg.sender?.userId;
-        const agentInfo = uid && AGENT_MAP[uid] ? AGENT_MAP[uid].name : 'AGENTE';
+        const sender = msg.sender;
+        const uid = sender?.userId;
+        const source = sender?.source;
+        let label = 'AGENTE';
+
+        if (source === 'ai_agent') {
+          const known = AGENT_MAP[uid];
+          label = '[BOT] ' + (known ? known.name : 'Agente Virtual');
+        } else if (source === 'user' && uid) {
+          const known = AGENT_MAP[uid];
+          label = known ? known.name : 'Agente #' + uid;
+        } else if (source === 'workflow') {
+          label = '[WORKFLOW]';
+        }
+
         const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
-        return agentInfo + ': ' + text;
+        return label + ': ' + text;
       }
     }).join('\n');
 
     const channel = messages[0]?.channelType || messages[0]?.channel || 'desconocido';
     const link = 'https://app.respond.io/space/379868/inbox/' + contactId;
+
+    // Build the evaluation section based on whether there's a bot
+    const hasBotAgent = bots.length > 0;
+    const hasHumanAgent = humans.length > 0;
+
+    let evaluationInstructions = '';
+    if (hasBotAgent && hasHumanAgent) {
+      evaluationInstructions = `
+EVALUACION - Hay AGENTE VIRTUAL (bot) y AGENTES HUMANOS en esta conversacion. Evalua AMBOS por separado:
+
+evaluacion_bot (del Filmorent Assistant / agente virtual):
+- precision_respuestas: Las respuestas del bot fueron correctas y relevantes? (10=perfecto, 1=informacion erronea)
+- manejo_consulta: Entendio bien lo que el cliente necesitaba? (10=perfecto entendimiento, 1=no entendio nada)
+- transicion_humano: Paso al agente humano en el momento correcto? (10=transicion perfecta, 1=debio pasar antes/despues)
+- tono_comunicacion: El tono fue natural, amable y profesional? (10=excelente, 1=robotico/frio)
+- feedback_bot: Que hizo bien y que deberia mejorar el bot. Se MUY especifico con ejemplos de la conversacion.
+- mejoras_sugeridas: ["Sugerencia concreta 1 para mejorar el bot", "Sugerencia 2"]
+
+evaluacion_agente (de los agentes humanos: ${humanNames}):
+- tiempo_respuesta: Respondio rapido o tardo mucho? (10=inmediato, 1=horas/dias sin responder)
+- conocimiento_producto: Conoce bien el catalogo y specs del equipo? (10=experto, 1=no sabe)
+- alternativas_ofrecidas: Ofrecio alternativas cuando algo no estaba disponible? (10=multiples opciones relevantes, 1=no ofrecio nada)
+- seguimiento: Hizo follow-up si el cliente no contesto? Cerro la venta? (10=excelente seguimiento, 1=abandono la conversacion)
+- trato_cliente: Fue amable, profesional, resolvio todas las dudas? (10=excelente, 1=grosero/negligente)
+- cierre_venta: Logro concretar la renta? Proceso el pedido correctamente? (10=cerro exitosamente, 5=no aplica, 1=perdio venta evitable)`;
+    } else if (hasBotAgent) {
+      evaluationInstructions = `
+EVALUACION - SOLO el agente virtual (bot) respondio en esta conversacion:
+
+evaluacion_bot (del Filmorent Assistant):
+- precision_respuestas: Las respuestas del bot fueron correctas y relevantes? (10=perfecto, 1=informacion erronea)
+- manejo_consulta: Entendio bien lo que el cliente necesitaba? (10=perfecto entendimiento, 1=no entendio nada)
+- transicion_humano: Paso al agente humano en el momento correcto? (10=transicion perfecta, 1=debio pasar antes/despues, 5=no fue necesario)
+- tono_comunicacion: El tono fue natural, amable y profesional? (10=excelente, 1=robotico/frio)
+- feedback_bot: Que hizo bien y que deberia mejorar el bot.
+- mejoras_sugeridas: ["Sugerencia concreta 1", "Sugerencia 2"]
+
+evaluacion_agente: null (no hubo agente humano)`;
+    } else {
+      evaluationInstructions = `
+EVALUACION DEL AGENTE HUMANO (${humanNames}):
+- tiempo_respuesta: Respondio rapido o tardo mucho? (10=inmediato, 1=horas/dias sin responder)
+- conocimiento_producto: Conoce bien el catalogo y specs del equipo? (10=experto, 1=no sabe)
+- alternativas_ofrecidas: Ofrecio alternativas cuando algo no estaba disponible? (10=multiples opciones relevantes, 1=no ofrecio nada)
+- seguimiento: Hizo follow-up si el cliente no contesto? Cerro la venta? (10=excelente seguimiento, 1=abandono la conversacion)
+- trato_cliente: Fue amable, profesional, resolvio todas las dudas? (10=excelente, 1=grosero/negligente)
+- cierre_venta: Logro concretar la renta? Proceso el pedido correctamente? (10=cerro exitosamente, 5=no aplica, 1=perdio venta evitable)`;
+    }
+
+    // Build expected JSON structure description
+    let jsonStructure = '';
+    if (hasBotAgent && hasHumanAgent) {
+      jsonStructure = `{
+  "tags": ["tag1"],
+  "causa_renta_perdida": "causa o null",
+  "resumen": "Resumen COMPLETO de 3-5 oraciones",
+  "resultado": "concretada | perdida | pendiente | no_aplica",
+  "equipos_solicitados": [{"nombre": "equipo", "disponible": true}],
+  "evaluacion_bot": {
+    "precision_respuestas": 8,
+    "manejo_consulta": 7,
+    "transicion_humano": 9,
+    "tono_comunicacion": 8,
+    "calificacion_general": 8,
+    "feedback_bot": "Feedback especifico del bot",
+    "mejoras_sugeridas": ["Mejora 1", "Mejora 2"]
+  },
+  "evaluacion_agente": {
+    "tiempo_respuesta": 8,
+    "conocimiento_producto": 7,
+    "alternativas_ofrecidas": 9,
+    "seguimiento": 6,
+    "trato_cliente": 8,
+    "cierre_venta": 7,
+    "calificacion_general": 7.5,
+    "feedback": "Feedback especifico por agente",
+    "recomendaciones": ["Recomendacion 1", "Recomendacion 2"]
+  }
+}`;
+    } else if (hasBotAgent) {
+      jsonStructure = `{
+  "tags": ["tag1"],
+  "causa_renta_perdida": "causa o null",
+  "resumen": "Resumen COMPLETO de 3-5 oraciones",
+  "resultado": "concretada | perdida | pendiente | no_aplica",
+  "equipos_solicitados": [{"nombre": "equipo", "disponible": true}],
+  "evaluacion_bot": {
+    "precision_respuestas": 8,
+    "manejo_consulta": 7,
+    "transicion_humano": 9,
+    "tono_comunicacion": 8,
+    "calificacion_general": 8,
+    "feedback_bot": "Feedback especifico del bot",
+    "mejoras_sugeridas": ["Mejora 1", "Mejora 2"]
+  },
+  "evaluacion_agente": null
+}`;
+    } else {
+      jsonStructure = `{
+  "tags": ["tag1"],
+  "causa_renta_perdida": "causa o null",
+  "resumen": "Resumen COMPLETO de 3-5 oraciones",
+  "resultado": "concretada | perdida | pendiente | no_aplica",
+  "equipos_solicitados": [{"nombre": "equipo", "disponible": true}],
+  "evaluacion_bot": null,
+  "evaluacion_agente": {
+    "tiempo_respuesta": 8,
+    "conocimiento_producto": 7,
+    "alternativas_ofrecidas": 9,
+    "seguimiento": 6,
+    "trato_cliente": 8,
+    "cierre_venta": 7,
+    "calificacion_general": 7.5,
+    "feedback": "Feedback especifico por agente",
+    "recomendaciones": ["Recomendacion 1", "Recomendacion 2"]
+  }
+}`;
+    }
 
     const analysisPrompt = `Analiza la siguiente conversacion de Filmorent, un negocio de RENTA de equipo de cine y fotografia en Monterrey, Mexico.
 
@@ -202,42 +375,19 @@ TAGS A EVALUAR:
 3. "incidencia" - Problema, queja, equipo dañado, entrega tarde, cobro incorrecto.
 4. "renta-perdida" - Cliente queria rentar pero NO se concreto. Causa: "precio", "sin_respuesta_cliente", "tardanza_respuesta", "fechas", "ubicacion", "otro".
 
-AGENTES QUE PARTICIPARON: ${agentNames}
-
-EVALUACION DEL AGENTE - Califica de 1 a 10 en cada aspecto. Si hubo multiples agentes, evalua al EQUIPO en general pero menciona a cada agente por nombre en el feedback:
-- tiempo_respuesta: Respondio rapido o tardo mucho? (10=inmediato, 1=horas/dias sin responder)
-- conocimiento_producto: Conoce bien el catalogo y specs del equipo? (10=experto, 1=no sabe)
-- alternativas_ofrecidas: Ofrecio alternativas cuando algo no estaba disponible? (10=multiples opciones relevantes, 1=no ofrecio nada)
-- seguimiento: Hizo follow-up si el cliente no contesto? Cerro la venta? (10=excelente seguimiento, 1=abandono la conversacion)
-- trato_cliente: Fue amable, profesional, resolvio todas las dudas? (10=excelente, 1=grosero/negligente)
-- cierre_venta: Logro concretar la renta? Proceso el pedido correctamente? (10=cerro exitosamente, 5=no aplica, 1=perdio venta evitable)
+AGENTES HUMANOS QUE RESPONDIERON: ${humanNames}
+AGENTE VIRTUAL (BOT): ${botNames}
+${evaluationInstructions}
 
 CONVERSACION:
 ${formattedMessages}
 
 Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro):
-{
-  "tags": ["tag1"],
-  "causa_renta_perdida": "causa o null",
-  "resumen": "Resumen COMPLETO de 3-5 oraciones: que pidio el cliente, que paso durante la conversacion, que alternativas se ofrecieron, y cual fue el RESULTADO FINAL (se concreto la renta? el cliente dejo de contestar? se fue a otro lado? quedo pendiente?)",
-  "resultado": "concretada | perdida | pendiente | no_aplica",
-  "equipos_solicitados": [{"nombre": "equipo", "disponible": true}],
-  "evaluacion_agente": {
-    "tiempo_respuesta": 8,
-    "conocimiento_producto": 7,
-    "alternativas_ofrecidas": 9,
-    "seguimiento": 6,
-    "trato_cliente": 8,
-    "cierre_venta": 7,
-    "calificacion_general": 7.5,
-    "feedback": "Que hizo bien y que puede mejorar cada agente, siendo especifico con ejemplos de la conversacion. Menciona a cada agente por nombre.",
-    "recomendaciones": ["Recomendacion especifica 1", "Recomendacion especifica 2"]
-  }
-}`;
+${jsonStructure}`;
 
     const claudeResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 1000,
+      max_tokens: 1500,
       messages: [{ role: 'user', content: analysisPrompt }]
     });
 
@@ -248,7 +398,8 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
     let causaRentaPerdida = null;
     let resumen = '';
     let equipos = [];
-    let evaluacion = null;
+    let evaluacionAgente = null;
+    let evaluacionBot = null;
     let resultado = '';
 
     try {
@@ -261,7 +412,8 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
       causaRentaPerdida = parsed.causa_renta_perdida || null;
       resumen = parsed.resumen || '';
       equipos = parsed.equipos_solicitados || [];
-      evaluacion = parsed.evaluacion_agente || null;
+      evaluacionAgente = parsed.evaluacion_agente || null;
+      evaluacionBot = parsed.evaluacion_bot || null;
       resultado = parsed.resultado || '';
     } catch (e) {
       console.log('JSON parse error: ' + e.message);
@@ -306,7 +458,7 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
       console.log('No tags to apply');
     }
 
-    // Log to Google Sheets with agent data
+    // Log to Google Sheets with agent data (v5: separate human and bot data)
     await logToGoogleSheets({
       fecha: new Date().toISOString(),
       contactId: contactId,
@@ -320,12 +472,17 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
       conversacion_completa: formattedMessages.substring(0, 45000),
       resultado: resultado,
       equipos_solicitados: equipos,
-      evaluacion_agente: evaluacion,
-      agentes: agents.map(a => ({ nombre: a.name, email: a.email, userId: a.userId }))
+      evaluacion_agente: evaluacionAgente,
+      evaluacion_bot: evaluacionBot,
+      agentes_humanos: humans.map(a => ({ nombre: a.name, email: a.email, userId: a.userId })),
+      agentes_bot: bots.map(a => ({ nombre: a.name, userId: a.userId })),
+      agentes_todos: allNames,
+      assignee: assignee ? (assignee.firstName + ' ' + (assignee.lastName || '')).trim() : 'Sin asignar'
     });
 
-    const calif = evaluacion ? evaluacion.calificacion_general : 'N/A';
-    console.log('=== DONE: contact=' + contactId + ', agents=' + agentNames + ', calif=' + calif + '/10 ===\n');
+    const califHumano = evaluacionAgente ? evaluacionAgente.calificacion_general : 'N/A';
+    const califBot = evaluacionBot ? evaluacionBot.calificacion_general : 'N/A';
+    console.log('=== DONE: contact=' + contactId + ', humans=' + humanNames + ', bot=' + botNames + ', calif_humano=' + califHumano + '/10, calif_bot=' + califBot + '/10 ===\n');
 
   } catch (error) {
     console.error('Error:', error.message);
@@ -333,5 +490,5 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
 });
 
 app.listen(PORT, () => {
-  console.log('Filmorent Tag Analyzer v4 running on port ' + PORT);
+  console.log('Filmorent Tag Analyzer v5 running on port ' + PORT);
 });
