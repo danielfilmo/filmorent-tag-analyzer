@@ -7,6 +7,7 @@ app.use(express.json());
 // Config
 const RESPONDIO_API_KEY = process.env.RESPONDIO_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const GOOGLE_SHEETS_URL = process.env.GOOGLE_SHEETS_URL;
 const PORT = process.env.PORT || 3000;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -38,7 +39,31 @@ function extractContactName(body) {
   return fullName || body?.contact_name || body?.data?.contact_name || 'Desconocido';
 }
 
-// Main webhook endpoint
+/**
+ * Log conversation data to Google Sheets via Apps Script Web App.
+ */
+async function logToGoogleSheets(data) {
+  if (!GOOGLE_SHEETS_URL) {
+    console.log('Google Sheets URL not configured, skipping log.');
+    return;
+  }
+  try {
+    const response = await fetch(GOOGLE_SHEETS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      redirect: 'follow'
+    });
+    if (response.ok) {
+      console.log('Logged to Google Sheets successfully.');
+    } else {
+      console.error('Google Sheets log failed: ' + response.status);
+    }
+  } catch (error) {
+    console.error('Google Sheets log error: ' + error.message);
+  }
+}
+
 app.post('/webhook/conversation-closed', async (req, res) => {
   console.log('\n[' + new Date().toISOString() + '] === WEBHOOK RECEIVED ===');
   console.log('Headers:', JSON.stringify(req.headers, null, 2));
@@ -81,14 +106,15 @@ app.post('/webhook/conversation-closed', async (req, res) => {
       return;
     }
 
-    // Format messages for Claude analysis
     const formattedMessages = messages.map(msg => {
       const sender = msg.type === 'incoming' ? 'CLIENTE' : 'AGENTE';
       const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
       return sender + ': ' + text;
     }).join('\n');
 
-    // Analyze with Claude
+    // Detect channel from first message
+    const channel = messages[0]?.channelType || messages[0]?.channel || 'desconocido';
+
     const analysisPrompt = 'Analiza la siguiente conversacion de un negocio de RENTA de equipo de cine y fotografia (Filmorent, Monterrey Mexico). Determina si aplica alguno de estos tags:\n\n' +
       '1. "consulta-compra" - El cliente pregunta por COMPRAR equipo (no rentar). Filmorent solo renta, no vende.\n' +
       '2. "equipo-no-disponible" - El cliente pregunta por equipo que NO esta disponible. Esto incluye DOS casos: (a) equipo que no existe en el catalogo de Filmorent (equipo muy especializado, marcas no comunes, etc), o (b) equipo que si esta en el catalogo pero ya esta rentado/no hay unidades disponibles en ese momento.\n' +
@@ -96,13 +122,13 @@ app.post('/webhook/conversation-closed', async (req, res) => {
       '4. "renta-perdida" - La conversacion muestra que el cliente tenia intencion de rentar pero la renta NO se concreto. Si detectas este tag, DEBES incluir la causa en el campo "causa_renta_perdida". Causas comunes: "precio" (el cliente considero caro o pidio descuento y no se llego a acuerdo), "sin_respuesta_cliente" (el cliente dejo de responder despues de recibir info/cotizacion), "tardanza_respuesta" (el agente tardo mucho en responder y el cliente se fue o busco en otro lado), "fechas" (no coincidian las fechas de disponibilidad), "otro" (cualquier otra razon, especificar en detalle).\n\n' +
       'CONVERSACION:\n' + formattedMessages + '\n\n' +
       'Responde UNICAMENTE con un JSON valido en este formato exacto, sin texto adicional:\n' +
-      '{"tags": ["tag1", "tag2"], "causa_renta_perdida": "causa si aplica, null si no"}\n\n' +
-      'Si no aplica ningun tag, responde: {"tags": [], "causa_renta_perdida": null}\n' +
+      '{"tags": ["tag1", "tag2"], "causa_renta_perdida": "causa si aplica, null si no", "resumen": "resumen breve de la conversacion en 1-2 oraciones"}\n\n' +
+      'Si no aplica ningun tag, responde: {"tags": [], "causa_renta_perdida": null, "resumen": "resumen breve"}\n' +
       'Solo incluye tags que CLARAMENTE apliquen basado en la conversacion.';
 
     const claudeResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 300,
+      max_tokens: 400,
       messages: [{ role: 'user', content: analysisPrompt }]
     });
 
@@ -111,10 +137,12 @@ app.post('/webhook/conversation-closed', async (req, res) => {
 
     let tagsToApply = [];
     let causaRentaPerdida = null;
+    let resumen = '';
     try {
       const parsed = JSON.parse(analysisText);
       tagsToApply = parsed.tags || [];
       causaRentaPerdida = parsed.causa_renta_perdida || null;
+      resumen = parsed.resumen || '';
     } catch (e) {
       const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'renta-perdida'];
       validTags.forEach(tag => {
@@ -127,14 +155,13 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'renta-perdida'];
     tagsToApply = tagsToApply.filter(tag => validTags.includes(tag));
 
-    // If renta-perdida detected, add the cause as a sub-tag for tracking
+    // If renta-perdida detected, add the cause as a sub-tag
     if (tagsToApply.includes('renta-perdida') && causaRentaPerdida) {
       const causeTag = 'renta-perdida:' + causaRentaPerdida;
       tagsToApply.push(causeTag);
       console.log('Renta perdida causa: ' + causaRentaPerdida);
     }
 
-    // Apply tags via Respond.io API
     if (tagsToApply.length > 0) {
       const tagResponse = await fetch(
         'https://api.respond.io/v2/contact/id:' + contactId + '/tag',
@@ -157,6 +184,18 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     } else {
       console.log('No tags to apply');
     }
+
+    // Log to Google Sheets
+    await logToGoogleSheets({
+      fecha: new Date().toISOString(),
+      contactId: contactId,
+      nombre: contactName,
+      tags: tagsToApply.join(', '),
+      causa_renta_perdida: causaRentaPerdida || '',
+      num_mensajes: messages.length,
+      canal: channel,
+      resumen: resumen
+    });
 
     console.log('=== DONE: contact=' + contactId + ', tags=' + JSON.stringify(tagsToApply) + ' ===\n');
 
