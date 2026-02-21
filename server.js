@@ -89,11 +89,20 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     }).join('\n');
 
     // Analyze with Claude
-    const analysisPrompt = 'Analiza la siguiente conversacion de un negocio de RENTA de equipo de cine y fotografia (Filmorent, Monterrey Mexico). Determina si aplica alguno de estos tags:\n\n1. "consulta-compra" - El cliente pregunta por COMPRAR equipo (no rentar). Filmorent solo renta, no vende.\n2. "equipo-no-disponible" - El cliente pregunta por equipo que probablemente NO esta en el catalogo de renta (equipo muy especializado, marcas no comunes, etc).\n3. "incidencia" - El cliente reporta un problema, queja, equipo danado, entrega tarde, cobro incorrecto o cualquier situacion negativa.\n\nCONVERSACION:\n' + formattedMessages + '\n\nResponde UNICAMENTE con un JSON valido en este formato exacto, sin texto adicional:\n{"tags": ["tag1", "tag2"]}\n\nSi no aplica ningun tag, responde: {"tags": []}\nSolo incluye tags que CLARAMENTE apliquen basado en la conversacion.';
+    const analysisPrompt = 'Analiza la siguiente conversacion de un negocio de RENTA de equipo de cine y fotografia (Filmorent, Monterrey Mexico). Determina si aplica alguno de estos tags:\n\n' +
+      '1. "consulta-compra" - El cliente pregunta por COMPRAR equipo (no rentar). Filmorent solo renta, no vende.\n' +
+      '2. "equipo-no-disponible" - El cliente pregunta por equipo que NO esta disponible. Esto incluye DOS casos: (a) equipo que no existe en el catalogo de Filmorent (equipo muy especializado, marcas no comunes, etc), o (b) equipo que si esta en el catalogo pero ya esta rentado/no hay unidades disponibles en ese momento.\n' +
+      '3. "incidencia" - El cliente reporta un problema, queja, equipo danado, entrega tarde, cobro incorrecto o cualquier situacion negativa.\n' +
+      '4. "renta-perdida" - La conversacion muestra que el cliente tenia intencion de rentar pero la renta NO se concreto. Si detectas este tag, DEBES incluir la causa en el campo "causa_renta_perdida". Causas comunes: "precio" (el cliente considero caro o pidio descuento y no se llego a acuerdo), "sin_respuesta_cliente" (el cliente dejo de responder despues de recibir info/cotizacion), "tardanza_respuesta" (el agente tardo mucho en responder y el cliente se fue o busco en otro lado), "fechas" (no coincidian las fechas de disponibilidad), "otro" (cualquier otra razon, especificar en detalle).\n\n' +
+      'CONVERSACION:\n' + formattedMessages + '\n\n' +
+      'Responde UNICAMENTE con un JSON valido en este formato exacto, sin texto adicional:\n' +
+      '{"tags": ["tag1", "tag2"], "causa_renta_perdida": "causa si aplica, null si no"}\n\n' +
+      'Si no aplica ningun tag, responde: {"tags": [], "causa_renta_perdida": null}\n' +
+      'Solo incluye tags que CLARAMENTE apliquen basado en la conversacion.';
 
     const claudeResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 150,
+      max_tokens: 300,
       messages: [{ role: 'user', content: analysisPrompt }]
     });
 
@@ -101,11 +110,13 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     console.log('Claude analysis: ' + analysisText);
 
     let tagsToApply = [];
+    let causaRentaPerdida = null;
     try {
       const parsed = JSON.parse(analysisText);
       tagsToApply = parsed.tags || [];
+      causaRentaPerdida = parsed.causa_renta_perdida || null;
     } catch (e) {
-      const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia'];
+      const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'renta-perdida'];
       validTags.forEach(tag => {
         if (analysisText.toLowerCase().includes(tag)) {
           tagsToApply.push(tag);
@@ -113,8 +124,15 @@ app.post('/webhook/conversation-closed', async (req, res) => {
       });
     }
 
-    const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia'];
+    const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'renta-perdida'];
     tagsToApply = tagsToApply.filter(tag => validTags.includes(tag));
+
+    // If renta-perdida detected, add the cause as a sub-tag for tracking
+    if (tagsToApply.includes('renta-perdida') && causaRentaPerdida) {
+      const causeTag = 'renta-perdida:' + causaRentaPerdida;
+      tagsToApply.push(causeTag);
+      console.log('Renta perdida causa: ' + causaRentaPerdida);
+    }
 
     // Apply tags via Respond.io API
     if (tagsToApply.length > 0) {
