@@ -23,8 +23,19 @@ const AGENT_MAP = {
   1028000: { name: 'Filmorent Assistant', email: '', type: 'bot' }
 };
 
+// v7: Agent roles for context-aware evaluation
+function getAgentRole(name) {
+  const roles = {
+    'Daniel Alonso': 'owner',
+    'Suheidi Dominguez': 'admin',
+    'Filmorent Assistant': 'bot',
+    'Workflow Automatizado': 'bot'
+  };
+  return roles[name] || 'sales';
+}
+
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v6' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v7' }));
 
 function extractContactId(body) {
   return (
@@ -50,7 +61,6 @@ function extractContactName(body) {
 /**
  * Extract agents who ACTUALLY SENT messages.
  * Uses sender.source: "user" = human, "ai_agent" = bot
- * Does NOT include assignee unless they sent a message.
  */
 function extractAgentsFromMessages(messages) {
   const humanAgents = new Map();
@@ -136,7 +146,7 @@ async function logToGoogleSheets(data) {
 }
 
 app.post('/webhook/conversation-closed', async (req, res) => {
-  console.log('\n[' + new Date().toISOString() + '] === WEBHOOK RECEIVED ===');
+  console.log('\n[' + new Date().toISOString() + '] === WEBHOOK RECEIVED (v7) ===');
   console.log('Body:', JSON.stringify(req.body, null, 2));
 
   res.json({ received: true });
@@ -203,13 +213,24 @@ app.post('/webhook/conversation-closed', async (req, res) => {
 
     console.log('Agents detected - Humans: ' + humanNames.join(', ') + ' | Bots: ' + botNames.join(', '));
 
-    // Format messages for analysis - include agent name and type
+    // v7: Format messages including internal notes
     const formattedMessages = messages.map(msg => {
       const traffic = msg.traffic || msg.type;
+
+      // v7: Detect internal notes/comments
+      if (traffic === 'internal' || msg.internal === true || msg.messageType === 'internal') {
+        const sender = msg.sender;
+        const uid = sender?.userId;
+        const known = uid ? AGENT_MAP[uid] : null;
+        const senderName = known ? known.name : (sender?.name || 'Equipo');
+        const text = msg.text || msg.message?.text || msg.body || '[nota sin texto]';
+        return 'NOTA INTERNA de ' + senderName + ': ' + text;
+      }
+
       if (traffic === 'incoming') {
         const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
         return 'CLIENTE: ' + text;
-      } else {
+      } else if (traffic === 'outgoing') {
         const sender = msg.sender;
         const uid = sender?.userId;
         const source = sender?.source;
@@ -228,7 +249,12 @@ app.post('/webhook/conversation-closed', async (req, res) => {
         const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
         return label + ': ' + text;
       }
-    }).join('\n');
+
+      // Fallback for any other message type
+      const text = msg.text || msg.message?.text || msg.body || '';
+      if (text) return '[SISTEMA]: ' + text;
+      return null;
+    }).filter(m => m !== null).join('\n');
 
     const channel = messages[0]?.channelType || messages[0]?.channel || 'desconocido';
     const link = 'https://app.respond.io/space/379868/inbox/' + contactId;
@@ -236,104 +262,131 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     const hasBotAgent = bots.length > 0;
     const hasHumanAgent = humans.length > 0;
 
-    // Build individual agent evaluation instructions
+    // v7: Build conversation identifier
+    const conversacionId = contactName + ' - ' + channel + ' (#' + contactId + ')';
+
+    // v7: Build agent roles info
+    const agentRolesInfo = humans.map(a => {
+      const role = getAgentRole(a.name);
+      const roleDesc = {
+        'owner': 'dueño del negocio',
+        'admin': 'administración (facturación, cobranza, logística)',
+        'sales': 'ventas y atención al cliente'
+      };
+      return a.name + ' (' + (roleDesc[role] || role) + ')';
+    }).join(', ');
+
+    // v7: Build evaluation instructions per agent
     let humanEvalInstructions = '';
     if (hasHumanAgent) {
-      if (humanNames.length === 1) {
-        humanEvalInstructions = `
-EVALUACION INDIVIDUAL DEL AGENTE HUMANO - Evalua a ${humanNames[0]} basandote SOLO en los mensajes que ESTE agente envio:
-
-"evaluaciones_individuales": [
-  {
-    "nombre_agente": "${humanNames[0]}",
-    "tiempo_respuesta": 8,
-    "conocimiento_producto": 7,
-    "alternativas_ofrecidas": 9,
-    "seguimiento": 6,
-    "trato_cliente": 8,
-    "cierre_venta": 7,
-    "calificacion_general": 7.5,
-    "feedback": "Que hizo bien y que puede mejorar este agente, con ejemplos ESPECIFICOS de sus mensajes en la conversacion.",
-    "recomendaciones": ["Recomendacion 1", "Recomendacion 2"]
-  }
-]`;
-      } else {
-        const agentEntries = humanNames.map(name => `  {
+      const agentEntries = humanNames.map(name => {
+        const role = getAgentRole(name);
+        return `  {
     "nombre_agente": "${name}",
-    "tiempo_respuesta": 8,
-    "conocimiento_producto": 7,
-    "alternativas_ofrecidas": 9,
-    "seguimiento": 6,
-    "trato_cliente": 8,
-    "cierre_venta": 7,
+    "rol": "${role}",
+    "atencion_cliente": 8,
+    "conocimiento_solucion": 7,
+    "proactividad": 8,
+    "cierre_resultado": 7,
     "calificacion_general": 7.5,
-    "feedback": "Que hizo bien y que puede mejorar ESTE agente especificamente, basandote SOLO en SUS mensajes.",
-    "recomendaciones": ["Recomendacion especifica para este agente"]
-  }`).join(',\n');
+    "feedback": "Maximo 2 oraciones: 1 cosa bien + 1 a mejorar (si aplica). Si hizo bien su trabajo, solo reconocerlo."
+  }`;
+      }).join(',\n');
 
-        humanEvalInstructions = `
-EVALUACION INDIVIDUAL POR AGENTE - IMPORTANTE: Evalua a CADA agente POR SEPARADO basandote UNICAMENTE en los mensajes que ESE agente envio. NO mezcles la evaluacion de un agente con la de otro. Si un agente solo envio 1 mensaje, evalualo solo por ese mensaje.
-
-Criterios por agente:
-- tiempo_respuesta: Respondio rapido O tardo mucho despues del mensaje anterior? (10=inmediato, 1=horas/dias sin responder)
-- conocimiento_producto: En SUS mensajes, demostro conocer el catalogo y specs? (10=experto, 1=no sabe)
-- alternativas_ofrecidas: Ofrecio alternativas cuando algo no estaba disponible? (10=varias opciones, 1=ninguna)
-- seguimiento: Hizo follow-up? Cerro la venta? (10=excelente, 1=abandono)
-- trato_cliente: Fue amable y profesional en SUS mensajes? (10=excelente, 1=grosero)
-- cierre_venta: Contribuyo a cerrar la renta? (10=cerro exitosamente, 5=no aplica, 1=perdio venta)
-
+      humanEvalInstructions = `
 "evaluaciones_individuales": [
 ${agentEntries}
 ]`;
-      }
     }
 
     let botEvalInstructions = '';
     if (hasBotAgent) {
       botEvalInstructions = `
-EVALUACION DEL BOT (Filmorent Assistant) - Evalua al agente virtual basandote en SUS mensajes (los marcados con [BOT]):
-
 "evaluacion_bot": {
   "precision_respuestas": 8,
   "manejo_consulta": 7,
   "transicion_humano": 9,
   "tono_comunicacion": 8,
   "calificacion_general": 8,
-  "feedback_bot": "Que hizo bien y que deberia mejorar el bot. Se MUY especifico.",
-  "mejoras_sugeridas": ["Mejora concreta 1", "Mejora concreta 2"]
+  "feedback_bot": "Que hizo bien y que deberia mejorar el bot.",
+  "mejoras_sugeridas": ["Mejora 1", "Mejora 2"]
 }`;
     }
 
-    const analysisPrompt = `Analiza la siguiente conversacion de Filmorent, un negocio de RENTA de equipo de cine y fotografia en Monterrey, Mexico.
+    // v7: COMPLETELY REWRITTEN PROMPT
+    const analysisPrompt = `Eres el evaluador de servicio al cliente de Filmorent, un negocio de RENTA de equipo de cine y fotografia en Monterrey, Mexico.
+
+=== PASO 1: ENTENDER LA CONVERSACION COMPLETA ===
+
+Lee TODA la conversacion de principio a fin. Entiende:
+- Que necesitaba el cliente
+- Como respondio el equipo EN CONJUNTO
+- Cual fue el resultado final
+- Las NOTAS INTERNAS son instrucciones del dueño (Daniel Alonso) al equipo. Seguirlas es CORRECTO.
+
+=== PASO 2: REGLAS CRITICAS DE EVALUACION ===
+
+REGLA 1 - TRABAJO EN EQUIPO: Los agentes trabajan como EQUIPO. Si un agente solo envio un mensaje de cierre cortes o de seguimiento, eso es POSITIVO y demuestra trabajo en equipo. NO penalizar porque "su participacion fue limitada" - cada mensaje cuenta.
+
+REGLA 2 - RAPIDEZ ES BUENA: Enviar cotizacion o informacion rapido es BUENO para el negocio. NUNCA penalizar por "enviar cotizacion antes de explicar" o "no dar contexto previo". La rapidez cierra rentas.
+
+REGLA 3 - ROLES DIFERENTES: Cada agente tiene un ROL diferente:
+${agentRolesInfo}
+- Agentes de ADMIN: Evaluar en facturacion, cobranza, logistica. NO penalizar por "no conocer equipos".
+- Agentes de VENTAS: Evaluar en atencion, conocimiento de equipos, cierre de rentas.
+- El DUEÑO: Generalmente da instrucciones internas, no evaluarlo a menos que interactue con el cliente.
+
+REGLA 4 - NOTAS INTERNAS: Los mensajes marcados "NOTA INTERNA" son instrucciones del dueño al equipo. Si un agente sigue una instruccion interna (ej: "ofrecele la ZVE10"), eso es CORRECTO. No penalizar por "introducir informacion no solicitada" cuando fue una instruccion.
+
+REGLA 5 - ENFOCARSE EN LO IMPORTANTE: Evalua lo que REALMENTE importa para el negocio:
+- Se atendio bien al cliente?
+- Se respondieron TODAS sus preguntas?
+- Se busco resolver su necesidad?
+- Se contribuyo a concretar la renta?
+NO buscar defectos artificiales. Si el agente hizo bien su trabajo, di que lo hizo bien.
+
+REGLA 6 - FEEDBACK UTIL: El feedback debe ser ACCIONABLE y ENFOCADO. Maximo 2 oraciones: 1 cosa positiva + 1 area de mejora (SOLO si realmente hay algo importante que mejorar). Si el agente hizo bien su trabajo, no inventes criticas.
+
+=== DATOS DE LA CONVERSACION ===
+
+Conversacion: ${conversacionId}
+Canal: ${channel}
+Agentes humanos: ${humanNames.join(', ') || 'Ninguno'}
+Roles: ${agentRolesInfo || 'N/A'}
+Bot: ${botNames.join(', ') || 'Ninguno'}
+
+=== CONVERSACION ===
+${formattedMessages}
+
+=== PASO 3: EVALUAR ===
+
+Criterios por agente humano (1-10):
+1. atencion_cliente: Cordialidad, profesionalismo, respondio todas las preguntas del cliente? (Adaptado al ROL del agente)
+2. conocimiento_solucion: Demostro conocimiento relevante a su rol y busco soluciones? (Para ventas: equipos. Para admin: procesos administrativos)
+3. proactividad: Fue rapido, ofrecio alternativas, dio seguimiento, tomo iniciativa?
+4. cierre_resultado: Contribuyo a concretar la renta o resolver la necesidad del cliente?
 
 TAGS A EVALUAR:
-1. "consulta-compra" - El cliente pregunta por COMPRAR equipo (Filmorent solo renta).
-2. "equipo-no-disponible" - Equipo no disponible (no existe en catalogo O ya esta rentado).
-3. "incidencia" - Problema, queja, equipo dañado, entrega tarde, cobro incorrecto.
+1. "consulta-compra" - Cliente pregunta por COMPRAR equipo (Filmorent solo renta).
+2. "equipo-no-disponible" - Equipo no disponible (no existe O ya rentado).
+3. "incidencia" - Problema, queja, equipo dañado, entrega tarde.
 4. "renta-perdida" - Cliente queria rentar pero NO se concreto. Causa: "precio", "sin_respuesta_cliente", "tardanza_respuesta", "fechas", "ubicacion", "otro".
-
-AGENTES HUMANOS: ${humanNames.join(', ') || 'Ninguno'}
-AGENTE VIRTUAL (BOT): ${botNames.join(', ') || 'Ninguno'}
-${humanEvalInstructions}
-${botEvalInstructions}
-
-CONVERSACION:
-${formattedMessages}
 
 Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro):
 {
+  "conversacion_id": "${conversacionId}",
   "tags": ["tag1"],
   "causa_renta_perdida": "causa o null",
-  "resumen": "Resumen COMPLETO de 3-5 oraciones: que pidio el cliente, que paso, que alternativas se ofrecieron, y cual fue el RESULTADO FINAL.",
+  "resumen": "Resumen de 3-5 oraciones: que pidio el cliente, que paso, y cual fue el RESULTADO FINAL.",
   "resultado": "concretada | perdida | pendiente | no_aplica",
   "equipos_solicitados": [{"nombre": "equipo", "disponible": true}],
-  "evaluaciones_individuales": [${hasHumanAgent ? '...' : ''}],
-  "evaluacion_bot": ${hasBotAgent ? '{...}' : 'null'}
+  ${hasHumanAgent ? humanEvalInstructions + ',' : '"evaluaciones_individuales": [],'}
+  ${hasBotAgent ? botEvalInstructions : '"evaluacion_bot": null'}
 }`;
 
     const claudeResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
+      max_tokens: 4000,
       messages: [{ role: 'user', content: analysisPrompt }]
     });
 
@@ -347,6 +400,7 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
     let evaluacionesIndividuales = [];
     let evaluacionBot = null;
     let resultado = '';
+    let parsedConversacionId = conversacionId;
 
     try {
       let cleanJson = analysisText;
@@ -361,6 +415,7 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
       evaluacionesIndividuales = parsed.evaluaciones_individuales || [];
       evaluacionBot = parsed.evaluacion_bot || null;
       resultado = parsed.resultado || '';
+      parsedConversacionId = parsed.conversacion_id || conversacionId;
     } catch (e) {
       console.log('JSON parse error: ' + e.message);
       const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'renta-perdida'];
@@ -400,12 +455,19 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
       }
     }
 
-    // Log to Google Sheets - v6 format with individual evaluations
+    // v7: Add role to each evaluation
+    evaluacionesIndividuales = evaluacionesIndividuales.map(ev => ({
+      ...ev,
+      rol: ev.rol || getAgentRole(ev.nombre_agente)
+    }));
+
+    // Log to Google Sheets - v7 format
     await logToGoogleSheets({
-      version: 'v6',
+      version: 'v7',
       fecha: new Date().toISOString(),
       contactId: contactId,
       nombre: contactName,
+      conversacion_id: parsedConversacionId,
       tags: tagsToApply.join(', '),
       causa_renta_perdida: causaRentaPerdida || '',
       num_mensajes: messages.length,
@@ -415,11 +477,9 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
       conversacion_completa: formattedMessages.substring(0, 45000),
       resultado: resultado,
       equipos_solicitados: equipos,
-      // v6: Individual evaluations per human agent
+      // v7: Individual evaluations with roles and 4 criteria
       evaluaciones_individuales: evaluacionesIndividuales,
-      // v6: Separate bot evaluation
       evaluacion_bot: evaluacionBot,
-      // Agent info
       agentes_humanos: humans.map(a => ({ nombre: a.name, email: a.email, userId: a.userId })),
       agentes_bot: bots.map(a => ({ nombre: a.name, userId: a.userId })),
       agentes_todos: allNames,
@@ -436,5 +496,5 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
 });
 
 app.listen(PORT, () => {
-  console.log('Filmorent Tag Analyzer v6 running on port ' + PORT);
+  console.log('Filmorent Tag Analyzer v7 running on port ' + PORT);
 });
