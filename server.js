@@ -114,21 +114,50 @@ app.post('/webhook/conversation-closed', async (req, res) => {
 
     // Detect channel from first message
     const channel = messages[0]?.channelType || messages[0]?.channel || 'desconocido';
+    const link = 'https://app.respond.io/space/379868/inbox/' + contactId;
 
-    const analysisPrompt = 'Analiza la siguiente conversacion de un negocio de RENTA de equipo de cine y fotografia (Filmorent, Monterrey Mexico). Determina si aplica alguno de estos tags:\n\n' +
-      '1. "consulta-compra" - El cliente pregunta por COMPRAR equipo (no rentar). Filmorent solo renta, no vende.\n' +
-      '2. "equipo-no-disponible" - El cliente pregunta por equipo que NO esta disponible. Esto incluye DOS casos: (a) equipo que no existe en el catalogo de Filmorent (equipo muy especializado, marcas no comunes, etc), o (b) equipo que si esta en el catalogo pero ya esta rentado/no hay unidades disponibles en ese momento.\n' +
-      '3. "incidencia" - El cliente reporta un problema, queja, equipo danado, entrega tarde, cobro incorrecto o cualquier situacion negativa.\n' +
-      '4. "renta-perdida" - La conversacion muestra que el cliente tenia intencion de rentar pero la renta NO se concreto. Si detectas este tag, DEBES incluir la causa en el campo "causa_renta_perdida". Causas comunes: "precio" (el cliente considero caro o pidio descuento y no se llego a acuerdo), "sin_respuesta_cliente" (el cliente dejo de responder despues de recibir info/cotizacion), "tardanza_respuesta" (el agente tardo mucho en responder y el cliente se fue o busco en otro lado), "fechas" (no coincidian las fechas de disponibilidad), "otro" (cualquier otra razon, especificar en detalle).\n\n' +
-      'CONVERSACION:\n' + formattedMessages + '\n\n' +
-      'Responde UNICAMENTE con un JSON valido en este formato exacto, sin texto adicional:\n' +
-      '{"tags": ["tag1", "tag2"], "causa_renta_perdida": "causa si aplica, null si no", "resumen": "resumen breve de la conversacion en 1-2 oraciones"}\n\n' +
-      'Si no aplica ningun tag, responde: {"tags": [], "causa_renta_perdida": null, "resumen": "resumen breve"}\n' +
-      'Solo incluye tags que CLARAMENTE apliquen basado en la conversacion.';
+    const analysisPrompt = `Analiza la siguiente conversacion de Filmorent, un negocio de RENTA de equipo de cine y fotografia en Monterrey, Mexico.
+
+TAGS A EVALUAR:
+1. "consulta-compra" - El cliente pregunta por COMPRAR equipo (Filmorent solo renta).
+2. "equipo-no-disponible" - Equipo no disponible (no existe en catalogo O ya esta rentado).
+3. "incidencia" - Problema, queja, equipo dañado, entrega tarde, cobro incorrecto.
+4. "renta-perdida" - Cliente queria rentar pero NO se concreto. Causa: "precio", "sin_respuesta_cliente", "tardanza_respuesta", "fechas", "ubicacion", "otro".
+
+EVALUACION DEL AGENTE - Califica de 1 a 10 en cada aspecto:
+- tiempo_respuesta: Respondio rapido o tardo mucho? (10=inmediato, 1=horas/dias sin responder)
+- conocimiento_producto: Conoce bien el catalogo y specs del equipo? (10=experto, 1=no sabe)
+- alternativas_ofrecidas: Ofrecio alternativas cuando algo no estaba disponible? (10=multiples opciones relevantes, 1=no ofrecio nada)
+- seguimiento: Hizo follow-up si el cliente no contesto? Cerro la venta? (10=excelente seguimiento, 1=abandono la conversacion)
+- trato_cliente: Fue amable, profesional, resolvio todas las dudas? (10=excelente, 1=grosero/negligente)
+- cierre_venta: Logro concretar la renta? Proceso el pedido correctamente? (10=cerro exitosamente, 5=no aplica, 1=perdio venta evitable)
+
+CONVERSACION:
+${formattedMessages}
+
+Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro):
+{
+  "tags": ["tag1"],
+  "causa_renta_perdida": "causa o null",
+  "resumen": "Resumen COMPLETO de 3-5 oraciones: que pidio el cliente, que paso durante la conversacion, que alternativas se ofrecieron, y cual fue el RESULTADO FINAL (se concreto la renta? el cliente dejo de contestar? se fue a otro lado? quedo pendiente?)",
+  "resultado": "concretada | perdida | pendiente | no_aplica",
+  "equipos_solicitados": [{"nombre": "equipo", "disponible": true}],
+  "evaluacion_agente": {
+    "tiempo_respuesta": 8,
+    "conocimiento_producto": 7,
+    "alternativas_ofrecidas": 9,
+    "seguimiento": 6,
+    "trato_cliente": 8,
+    "cierre_venta": 7,
+    "calificacion_general": 7.5,
+    "feedback": "Que hizo bien y que puede mejorar el agente, siendo especifico con ejemplos de la conversacion",
+    "recomendaciones": ["Recomendacion especifica 1", "Recomendacion especifica 2"]
+  }
+}`;
 
     const claudeResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 400,
+      max_tokens: 1000,
       messages: [{ role: 'user', content: analysisPrompt }]
     });
 
@@ -138,18 +167,31 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     let tagsToApply = [];
     let causaRentaPerdida = null;
     let resumen = '';
+    let equipos = [];
+    let evaluacion = null;
+    let resultado = '';
+
     try {
-      const parsed = JSON.parse(analysisText);
+      let cleanJson = analysisText;
+      if (cleanJson.startsWith('```')) {
+        cleanJson = cleanJson.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+      }
+      const parsed = JSON.parse(cleanJson);
       tagsToApply = parsed.tags || [];
       causaRentaPerdida = parsed.causa_renta_perdida || null;
       resumen = parsed.resumen || '';
+      equipos = parsed.equipos_solicitados || [];
+      evaluacion = parsed.evaluacion_agente || null;
+      resultado = parsed.resultado || '';
     } catch (e) {
+      console.log('JSON parse error: ' + e.message);
       const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'renta-perdida'];
       validTags.forEach(tag => {
         if (analysisText.toLowerCase().includes(tag)) {
           tagsToApply.push(tag);
         }
       });
+      resumen = 'Error parsing JSON';
     }
 
     const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'renta-perdida'];
@@ -185,7 +227,7 @@ app.post('/webhook/conversation-closed', async (req, res) => {
       console.log('No tags to apply');
     }
 
-    // Log to Google Sheets
+    // Log to Google Sheets with all v3 data
     await logToGoogleSheets({
       fecha: new Date().toISOString(),
       contactId: contactId,
@@ -194,10 +236,16 @@ app.post('/webhook/conversation-closed', async (req, res) => {
       causa_renta_perdida: causaRentaPerdida || '',
       num_mensajes: messages.length,
       canal: channel,
-      resumen: resumen
+      resumen: resumen,
+      link_conversacion: link,
+      conversacion_completa: formattedMessages.substring(0, 45000),
+      resultado: resultado,
+      equipos_solicitados: equipos,
+      evaluacion_agente: evaluacion
     });
 
-    console.log('=== DONE: contact=' + contactId + ', tags=' + JSON.stringify(tagsToApply) + ' ===\n');
+    const calif = evaluacion ? evaluacion.calificacion_general : 'N/A';
+    console.log('=== DONE: contact=' + contactId + ', tags=' + JSON.stringify(tagsToApply) + ', calif=' + calif + '/10 ===\n');
 
   } catch (error) {
     console.error('Error:', error.message);
@@ -205,5 +253,5 @@ app.post('/webhook/conversation-closed', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log('Filmorent Tag Analyzer running on port ' + PORT);
+  console.log('Filmorent Tag Analyzer v3 running on port ' + PORT);
 });
