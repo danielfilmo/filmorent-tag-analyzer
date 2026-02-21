@@ -1,5 +1,9 @@
 const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
+const OpenAI = require('openai');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const app = express();
 app.use(express.json());
@@ -7,10 +11,53 @@ app.use(express.json());
 // Config
 const RESPONDIO_API_KEY = process.env.RESPONDIO_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GOOGLE_SHEETS_URL = process.env.GOOGLE_SHEETS_URL;
 const PORT = process.env.PORT || 3000;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+
+// v7.1: Transcribe audio from URL using OpenAI Whisper
+async function transcribeAudio(audioUrl) {
+  if (!openai) {
+    console.log('OpenAI not configured, skipping audio transcription');
+    return null;
+  }
+
+  try {
+    // Download audio file to temp
+    const response = await fetch(audioUrl);
+    if (!response.ok) {
+      console.error('Failed to download audio: ' + response.status);
+      return null;
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const tempFile = path.join(os.tmpdir(), 'voice_' + Date.now() + '.ogg');
+    fs.writeFileSync(tempFile, buffer);
+
+    console.log('Audio downloaded: ' + buffer.length + ' bytes, transcribing...');
+
+    // Transcribe with Whisper
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(tempFile),
+      model: 'whisper-1',
+      language: 'es',
+      response_format: 'text'
+    });
+
+    // Cleanup temp file
+    fs.unlinkSync(tempFile);
+
+    const text = transcription.trim();
+    console.log('Transcription: "' + text + '"');
+    return text;
+  } catch (error) {
+    console.error('Transcription error: ' + error.message);
+    return null;
+  }
+}
 
 // Agent mapping: userId -> {name, email, type}
 const AGENT_MAP = {
@@ -35,7 +82,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v7' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v7.1', whisper: !!openai }));
 
 function extractContactId(body) {
   return (
@@ -213,9 +260,18 @@ app.post('/webhook/conversation-closed', async (req, res) => {
 
     console.log('Agents detected - Humans: ' + humanNames.join(', ') + ' | Bots: ' + botNames.join(', '));
 
-    // v7: Format messages including internal notes
-    const formattedMessages = messages.map(msg => {
+    // v7.1: Format messages including internal notes and voice transcriptions
+    const formattedMessagesArray = await Promise.all(messages.map(async (msg) => {
       const traffic = msg.traffic || msg.type;
+      const messageObj = msg.message || {};
+      const attachment = messageObj.attachment || {};
+
+      // v7.1: Check if this is a voice/audio message
+      const isAudio = (
+        messageObj.type === 'attachment' &&
+        attachment.type === 'audio' &&
+        attachment.url
+      );
 
       // v7: Detect internal notes/comments
       if (traffic === 'internal' || msg.internal === true || msg.messageType === 'internal') {
@@ -223,12 +279,20 @@ app.post('/webhook/conversation-closed', async (req, res) => {
         const uid = sender?.userId;
         const known = uid ? AGENT_MAP[uid] : null;
         const senderName = known ? known.name : (sender?.name || 'Equipo');
-        const text = msg.text || msg.message?.text || msg.body || '[nota sin texto]';
+        const text = msg.text || messageObj.text || msg.body || '[nota sin texto]';
         return 'NOTA INTERNA de ' + senderName + ': ' + text;
       }
 
       if (traffic === 'incoming') {
-        const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
+        // v7.1: Transcribe voice messages from clients
+        if (isAudio) {
+          const transcription = await transcribeAudio(attachment.url);
+          if (transcription) {
+            return 'CLIENTE [mensaje de voz]: ' + transcription;
+          }
+          return 'CLIENTE: [mensaje de voz - no se pudo transcribir]';
+        }
+        const text = msg.text || messageObj.text || msg.body || '[media/attachment]';
         return 'CLIENTE: ' + text;
       } else if (traffic === 'outgoing') {
         const sender = msg.sender;
@@ -246,15 +310,24 @@ app.post('/webhook/conversation-closed', async (req, res) => {
           label = '[WORKFLOW]';
         }
 
-        const text = msg.text || msg.message?.text || msg.body || '[media/attachment]';
+        // v7.1: Transcribe voice messages from agents too
+        if (isAudio) {
+          const transcription = await transcribeAudio(attachment.url);
+          if (transcription) {
+            return label + ' [mensaje de voz]: ' + transcription;
+          }
+          return label + ': [mensaje de voz - no se pudo transcribir]';
+        }
+        const text = msg.text || messageObj.text || msg.body || '[media/attachment]';
         return label + ': ' + text;
       }
 
       // Fallback for any other message type
-      const text = msg.text || msg.message?.text || msg.body || '';
+      const text = msg.text || messageObj.text || msg.body || '';
       if (text) return '[SISTEMA]: ' + text;
       return null;
-    }).filter(m => m !== null).join('\n');
+    }));
+    const formattedMessages = formattedMessagesArray.filter(m => m !== null).join('\n');
 
     const channel = messages[0]?.channelType || messages[0]?.channel || 'desconocido';
     const link = 'https://app.respond.io/space/379868/inbox/' + contactId;
@@ -463,7 +536,7 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
 
     // Log to Google Sheets - v7 format
     await logToGoogleSheets({
-      version: 'v7',
+      version: 'v7.1',
       fecha: new Date().toISOString(),
       contactId: contactId,
       nombre: contactName,
@@ -496,5 +569,6 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
 });
 
 app.listen(PORT, () => {
-  console.log('Filmorent Tag Analyzer v7 running on port ' + PORT);
+  console.log('Filmorent Tag Analyzer v7.1 running on port ' + PORT);
+  console.log('Whisper transcription: ' + (openai ? 'ENABLED' : 'DISABLED (set OPENAI_API_KEY to enable)'));
 });
