@@ -82,7 +82,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v7.1', whisper: !!openai }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v7.2', whisper: !!openai, autoSummary: true }));
 
 function extractContactId(body) {
   return (
@@ -568,7 +568,162 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
   }
 });
 
+// ============================================================
+// v7.2: AUTO-SUMMARY on Conversation Opened
+// When a conversation reopens, generate an AI summary of ALL
+// previous messages and post it as an internal comment so
+// the agent has immediate context.
+// ============================================================
+
+app.post('/webhook/conversation-opened', async (req, res) => {
+  console.log('\n[' + new Date().toISOString() + '] === CONVERSATION OPENED (v7.2) ===');
+
+  res.json({ received: true });
+
+  const contactId = extractContactId(req.body);
+  const contactName = extractContactName(req.body);
+
+  if (!contactId) {
+    console.error('conversation-opened: Could not extract contact_id');
+    return;
+  }
+
+  console.log('Generating summary for: ' + contactId + ' (' + contactName + ')');
+
+  try {
+    // Fetch ALL messages for this contact (up to 200 for full context)
+    const messagesResponse = await fetch(
+      'https://api.respond.io/v2/contact/id:' + contactId + '/message/list?limit=200',
+      {
+        headers: {
+          'Authorization': 'Bearer ' + RESPONDIO_API_KEY,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (!messagesResponse.ok) {
+      console.error('Failed to fetch messages: ' + messagesResponse.status);
+      return;
+    }
+
+    const messagesData = await messagesResponse.json();
+    const messages = messagesData.data || messagesData.items || [];
+
+    // Only generate summary if there are enough previous messages
+    if (messages.length < 3) {
+      console.log('Too few messages (' + messages.length + '), skipping summary');
+      return;
+    }
+
+    // Format messages (simplified - no audio transcription for speed)
+    const formattedMessages = messages.map(msg => {
+      const traffic = msg.traffic || msg.type;
+      const messageObj = msg.message || {};
+      const text = msg.text || messageObj.text || msg.body || '';
+
+      if (traffic === 'internal' || msg.internal === true) {
+        const sender = msg.sender;
+        const uid = sender?.userId;
+        const known = uid ? AGENT_MAP[uid] : null;
+        const senderName = known ? known.name : 'Equipo';
+        return 'NOTA INTERNA de ' + senderName + ': ' + (text || '[nota]');
+      }
+
+      if (traffic === 'incoming') {
+        return 'CLIENTE: ' + (text || '[media]');
+      } else if (traffic === 'outgoing') {
+        const sender = msg.sender;
+        const uid = sender?.userId;
+        const source = sender?.source;
+        let label = 'AGENTE';
+
+        if (source === 'ai_agent') {
+          const known = AGENT_MAP[uid];
+          label = '[BOT] ' + (known ? known.name : 'Bot');
+        } else if (source === 'user' && uid) {
+          const known = AGENT_MAP[uid];
+          label = known ? known.name : 'Agente';
+        } else if (source === 'workflow') {
+          label = '[WORKFLOW]';
+        }
+        return label + ': ' + (text || '[media]');
+      }
+      return null;
+    }).filter(m => m !== null).join('\n');
+
+    if (!formattedMessages || formattedMessages.length < 50) {
+      console.log('Not enough text content to summarize');
+      return;
+    }
+
+    // Generate summary with Claude
+    const summaryPrompt = `Eres asistente de Filmorent (renta de equipo de cine/foto en Monterrey).
+
+Genera un resumen BREVE y UTIL para el agente que va a atender a este cliente que vuelve a escribir. El agente necesita saber rapidamente:
+
+1. **Quien es**: Nombre del cliente y canal de comunicacion
+2. **Que ha pedido antes**: Equipos solicitados, fechas, proyectos mencionados
+3. **Estado actual**: Se concreto alguna renta? Quedo algo pendiente? Hubo algun problema?
+4. **Datos clave**: Precios cotizados, acuerdos hechos, condiciones especiales
+5. **Lo mas reciente**: Que paso en la ultima conversacion
+
+IMPORTANTE:
+- Maximo 8-10 lineas
+- Se directo y practico, esto es para que el agente sepa que paso SIN tener que leer todo
+- Si hubo multiples conversaciones/ciclos, resume TODOS, no solo el ultimo
+- Usa formato simple con viñetas
+- Escribe en español
+
+=== HISTORIAL COMPLETO DEL CLIENTE: ${contactName} ===
+${formattedMessages}
+
+=== FIN DEL HISTORIAL ===
+
+Genera el resumen ahora:`;
+
+    const claudeResponse = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: summaryPrompt }]
+    });
+
+    const summary = claudeResponse.content[0].text.trim();
+    console.log('Summary generated: ' + summary.substring(0, 200) + '...');
+
+    // Post summary as internal comment via Respond.io API
+    const commentResponse = await fetch(
+      'https://api.respond.io/v2/contact/id:' + contactId + '/message/send',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + RESPONDIO_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          message: {
+            type: 'text',
+            text: '🤖 RESUMEN AUTOMATICO (IA)\n━━━━━━━━━━━━━━━━━━━━\n' + summary + '\n━━━━━━━━━━━━━━━━━━━━\n📝 Resumen generado al reabrir conversacion'
+          },
+          internal: true
+        })
+      }
+    );
+
+    if (commentResponse.ok) {
+      console.log('Summary posted as internal comment for contact ' + contactId);
+    } else {
+      const errorText = await commentResponse.text();
+      console.error('Failed to post comment: ' + commentResponse.status + ' - ' + errorText);
+    }
+
+  } catch (error) {
+    console.error('conversation-opened error: ' + error.message);
+  }
+});
+
 app.listen(PORT, () => {
-  console.log('Filmorent Tag Analyzer v7.1 running on port ' + PORT);
+  console.log('Filmorent Tag Analyzer v7.2 running on port ' + PORT);
   console.log('Whisper transcription: ' + (openai ? 'ENABLED' : 'DISABLED (set OPENAI_API_KEY to enable)'));
+  console.log('Auto-summary on conversation opened: ENABLED');
 });
