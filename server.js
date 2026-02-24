@@ -82,7 +82,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v7.2', whisper: !!openai, autoSummary: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v7.2.1', whisper: !!openai, autoSummary: true }));
 
 function extractContactId(body) {
   return (
@@ -693,7 +693,7 @@ Genera el resumen ahora:`;
 
     // Post summary as internal comment via Respond.io API
     const commentResponse = await fetch(
-      'https://api.respond.io/v2/contact/id:' + contactId + '/message/send',
+      'https://api.respond.io/v2/contact/id:' + contactId + '/comment',
       {
         method: 'POST',
         headers: {
@@ -701,11 +701,7 @@ Genera el resumen ahora:`;
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          message: {
-            type: 'text',
-            text: '🤖 RESUMEN AUTOMATICO (IA)\n━━━━━━━━━━━━━━━━━━━━\n' + summary + '\n━━━━━━━━━━━━━━━━━━━━\n📝 Resumen generado al reabrir conversacion'
-          },
-          internal: true
+          text: '🤖 RESUMEN AUTOMATICO (IA)\n━━━━━━━━━━━━━━━━━━━━\n' + summary + '\n━━━━━━━━━━━━━━━━━━━━\n📝 Resumen generado al reabrir conversacion'
         })
       }
     );
@@ -723,7 +719,7 @@ Genera el resumen ahora:`;
 });
 
 app.listen(PORT, () => {
-  console.log('Filmorent Tag Analyzer v7.2 running on port ' + PORT);
+  console.log('Filmorent Tag Analyzer v7.2.1 running on port ' + PORT);
   console.log('Whisper transcription: ' + (openai ? 'ENABLED' : 'DISABLED (set OPENAI_API_KEY to enable)'));
   console.log('Auto-summary on conversation opened: ENABLED');
 });
