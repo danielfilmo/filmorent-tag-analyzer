@@ -718,6 +718,139 @@ Genera el resumen ahora:`;
   }
 });
 
+
+// ============================================================
+// v7.3: CALL ENDED — analiza la transcripcion de una llamada
+// (Respond.io Voice AI / llamadas) y aplica tags. Si no hay
+// transcript (llamada perdida o sin grabacion), se omite.
+// ============================================================
+
+function extractCallTranscript(body) {
+  return (
+    body?.call?.transcript ||
+    body?.data?.call?.transcript ||
+    body?.transcript ||
+    body?.data?.transcript ||
+    null
+  );
+}
+
+function extractCallSummary(body) {
+  return (
+    body?.call?.summary ||
+    body?.data?.call?.summary ||
+    body?.summary ||
+    body?.data?.summary ||
+    body?.call?.aiSummary ||
+    body?.data?.call?.aiSummary ||
+    null
+  );
+}
+
+function extractCallMeta(body) {
+  const call = body?.call || body?.data?.call || body || {};
+  return {
+    callId: call?.id || call?.callId || null,
+    duration: call?.duration || call?.durationSeconds || null,
+    status: call?.status || null,
+    direction: call?.direction || null
+  };
+}
+
+app.post('/webhook/call-ended', async (req, res) => {
+  console.log('\n[' + new Date().toISOString() + '] === CALL ENDED (v7.3) ===');
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+
+  res.json({ received: true });
+
+  const contactId = extractContactId(req.body);
+  const contactName = extractContactName(req.body);
+  const transcript = extractCallTranscript(req.body);
+  const summary = extractCallSummary(req.body);
+  const meta = extractCallMeta(req.body);
+
+  console.log('Call meta: ' + JSON.stringify(meta) + ', contact=' + contactId + ' (' + contactName + ')');
+
+  if (!contactId) {
+    console.error('call-ended: Could not extract contact_id');
+    return;
+  }
+
+  if (!transcript) {
+    console.log('call-ended: No transcript for call ' + meta.callId + ' (llamada perdida, sin grabacion o en curso). Skipping.');
+    return;
+  }
+
+  try {
+    const summarySection = summary ? ('\n\nRESUMEN AI:\n' + summary) : '';
+
+    const analysisPrompt = 'Analiza la siguiente transcripcion de una LLAMADA telefonica entrante a Filmorent (renta de equipo audiovisual en Monterrey). Determina si aplica alguno de estos tags:\n\n' +
+      '1. "consulta-compra" - El cliente pregunto por COMPRAR equipo (no rentar). Filmorent solo renta, no vende.\n' +
+      '2. "equipo-no-disponible" - El cliente pregunto por equipo que probablemente NO esta en el catalogo de renta.\n' +
+      '3. "incidencia" - El cliente reporto un problema, queja, equipo danado, entrega tarde, cobro incorrecto o situacion negativa.\n' +
+      '4. "llamada-cotizacion" - La llamada fue una cotizacion exitosa donde el cliente dejo datos (nombre, equipo, fechas, contacto) y se le ofrecio mandar cotizacion por WhatsApp.\n\n' +
+      'TRANSCRIPCION:\n' + transcript + summarySection + '\n\n' +
+      'Responde UNICAMENTE con un JSON valido en este formato exacto, sin texto adicional:\n' +
+      '{"tags": ["tag1", "tag2"]}\n\n' +
+      'Si no aplica ningun tag, responde: {"tags": []}\n' +
+      'Solo incluye tags que CLARAMENTE apliquen basado en la llamada.';
+
+    const claudeResponse = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 150,
+      messages: [{ role: 'user', content: analysisPrompt }]
+    });
+
+    const analysisText = claudeResponse.content[0].text.trim();
+    console.log('Claude call analysis: ' + analysisText);
+
+    let tagsToApply = [];
+    try {
+      let cleanJson = analysisText;
+      if (cleanJson.startsWith('```')) {
+        cleanJson = cleanJson.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+      }
+      const parsed = JSON.parse(cleanJson);
+      tagsToApply = parsed.tags || [];
+    } catch (e) {
+      const vt = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'llamada-cotizacion'];
+      vt.forEach(function (tag) {
+        if (analysisText.toLowerCase().includes(tag)) tagsToApply.push(tag);
+      });
+    }
+
+    const validTags = ['consulta-compra', 'equipo-no-disponible', 'incidencia', 'llamada-cotizacion'];
+    tagsToApply = tagsToApply.filter(function (tag) { return validTags.includes(tag); });
+
+    if (tagsToApply.length > 0) {
+      const tagResponse = await fetch(
+        'https://api.respond.io/v2/contact/id:' + contactId + '/tag',
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + RESPONDIO_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ tags: tagsToApply })
+        }
+      );
+      if (!tagResponse.ok) {
+        const errorText = await tagResponse.text();
+        console.error('call-ended: Failed to apply tags: ' + tagResponse.status + ' - ' + errorText);
+      } else {
+        console.log('call-ended: Tags applied: ' + tagsToApply.join(', '));
+      }
+    } else {
+      console.log('call-ended: No tags to apply');
+    }
+
+    console.log('=== DONE CALL: contact=' + contactId + ', call=' + meta.callId + ', tags=' + JSON.stringify(tagsToApply) + ' ===\n');
+  } catch (error) {
+    console.error('call-ended error: ' + error.message);
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log('Filmorent Tag Analyzer v7.2.1 running on port ' + PORT);
   console.log('Whisper transcription: ' + (openai ? 'ENABLED' : 'DISABLED (set OPENAI_API_KEY to enable)'));
