@@ -458,7 +458,7 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
 }`;
 
     const claudeResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-5',
       max_tokens: 4000,
       messages: [{ role: 'user', content: analysisPrompt }]
     });
@@ -683,7 +683,7 @@ ${formattedMessages}
 Genera el resumen ahora:`;
 
     const claudeResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-5',
       max_tokens: 1000,
       messages: [{ role: 'user', content: summaryPrompt }]
     });
@@ -796,7 +796,7 @@ app.post('/webhook/call-ended', async (req, res) => {
       'Solo incluye tags que CLARAMENTE apliquen basado en la llamada.';
 
     const claudeResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-5',
       max_tokens: 150,
       messages: [{ role: 'user', content: analysisPrompt }]
     });
