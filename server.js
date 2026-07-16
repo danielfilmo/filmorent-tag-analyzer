@@ -937,6 +937,30 @@ app.get('/backfill', async (req, res) => {
   const from = req.query.from, to = req.query.to;
   if (!from || !to) return res.status(400).json({ error: 'faltan from y to (YYYY-MM-DD)' });
 
+  // DIAGNOSTICO: ?dump=1 -> lista 1 contacto (por createdAt, que si funciona) y devuelve
+  // el objeto completo para descubrir los nombres de campo reales (ej. el de ultimo mensaje).
+  if (req.query.dump === '1') {
+    try {
+      const val = { from: backfillFmtValue(from, 'from', 'datetime'), to: backfillFmtValue(to, 'to', 'datetime') };
+      const r = await backfillListPage('createdAt', val, null, 1);
+      const item = (r.items && r.items[0]) || null;
+      let full = null;
+      if (item && item.id) {
+        const gr = await fetch('https://api.respond.io/v2/contact/id:' + item.id, {
+          headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' }
+        });
+        try { full = await gr.json(); } catch (e) { full = null; }
+      }
+      return res.json({
+        dump: true, listStatus: r.status,
+        listItemKeys: item ? Object.keys(item) : null,
+        listItem: item,
+        fullContactKeys: full ? Object.keys(full) : null,
+        fullContact: full
+      });
+    } catch (e) { return res.status(500).json({ dumpError: e.message }); }
+  }
+
   try {
     const disc = await backfillDiscover(from, to, req.query.field, req.query.valueFormat);
     if (req.query.probe === '1') return res.json({ probe: true, chosen: { field: disc.field, fmt: disc.fmt }, log: disc.log, value: disc.value });
@@ -959,6 +983,87 @@ app.get('/backfill', async (req, res) => {
       ok: true, field: disc.field, valueFormat: disc.fmt, value: disc.value,
       windowEmpty: !!disc.empty, lastStatus: lastStatus, pages: pages,
       count: uniqueIds.length, sample: uniqueIds.slice(0, 10), ids: uniqueIds
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ‚îÄ‚îÄ v7.5 BACKFILL SCAN (para el hueco COMPLETO, incl. clientes recurrentes) ‚îÄ‚îÄ
+// La API publica solo deja filtrar contactos por createdAt (no por "ultimo mensaje").
+// Para atrapar tambien a los recurrentes activos en la ventana, este endpoint pagina
+// TODOS los contactos (por createdAt <= to) y para cada uno mira el timestamp de su
+// ultimo mensaje; marca inWindow si cae en [from,to]. Lo maneja el backfill.py local
+// (paginado + resumible). READ-ONLY: no escribe ni taggea.
+//   GET /backfill/scan?token=..&from=YYYY-MM-DD&to=YYYY-MM-DD&cursorId=&limit=40
+//   -> { results:[{id, ts, inWindow}], nextCursorId, scanned, sampleMsgKeys, sampleMsg }
+
+// extrae el timestamp (epoch ms) del objeto mensaje probando varios campos/formatos
+function backfillMsgTs(msg) {
+  if (!msg) return null;
+  const cands = [msg.timestamp, msg.createdAt, msg.created_at, msg.time, msg.messageTime,
+    msg.sentAt, msg.sent_at, msg.date, msg.updatedAt];
+  for (let v of cands) {
+    if (v == null) continue;
+    if (typeof v === 'number') return v < 1e12 ? v * 1000 : v; // s -> ms
+    if (typeof v === 'string') {
+      if (/^\d+$/.test(v)) { const n = Number(v); return n < 1e12 ? n * 1000 : n; }
+      const t = Date.parse(v); if (!isNaN(t)) return t;
+    }
+  }
+  return null;
+}
+
+async function backfillFetchMessages(contactId, limit, attempt) {
+  const r = await fetch('https://api.respond.io/v2/contact/id:' + contactId + '/message/list?limit=' + (limit || 3), {
+    headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' }
+  });
+  if (r.status === 429 && (attempt || 0) < 2) {
+    const ra = parseInt(r.headers.get('retry-after') || '2', 10);
+    await new Promise(z => setTimeout(z, (ra || 2) * 1000));
+    return backfillFetchMessages(contactId, limit, (attempt || 0) + 1);
+  }
+  if (!r.ok) return { status: r.status, messages: [] };
+  const j = await r.json().catch(() => null);
+  return { status: r.status, messages: (j && (j.data || j.items)) || [] };
+}
+
+app.get('/backfill/scan', async (req, res) => {
+  if (!BACKFILL_TOKEN) return res.status(403).json({ error: 'backfill deshabilitado: setea BACKFILL_TOKEN' });
+  if (req.query.token !== BACKFILL_TOKEN) return res.status(401).json({ error: 'token invalido' });
+  const from = req.query.from, to = req.query.to;
+  if (!from || !to) return res.status(400).json({ error: 'faltan from y to (YYYY-MM-DD)' });
+
+  const limit = Math.min(parseInt(req.query.limit || '40', 10), 60);
+  const cursorId = req.query.cursorId || null;
+  const fromMs = new Date(from + 'T00:00:00-06:00').getTime();
+  const toMs = new Date(to + 'T23:59:59-06:00').getTime();
+
+  try {
+    // 1) una pagina de contactos (todos los creados hasta 'to', datetime que ya sabemos que sirve)
+    const listVal = { from: backfillFmtValue('2015-01-01', 'from', 'datetime'), to: backfillFmtValue(to, 'to', 'datetime') };
+    const page = await backfillListPage('createdAt', listVal, cursorId, limit);
+    if (page.status >= 400) return res.status(502).json({ error: 'list fallo', status: page.status, body: (page.text || '').slice(0, 300) });
+
+    const results = [];
+    let sampleMsg = null, sampleMsgKeys = null;
+    for (let i = 0; i < page.items.length; i++) {
+      const it = page.items[i];
+      if (!it || !it.id) continue;
+      const mr = await backfillFetchMessages(it.id, 3, 0);
+      const newest = mr.messages && mr.messages[0] ? mr.messages[0] : null;
+      if (i === 0 && newest) { sampleMsg = newest; sampleMsgKeys = Object.keys(newest); }
+      const ts = backfillMsgTs(newest);
+      const inWindow = ts != null && ts >= fromMs && ts <= toMs;
+      results.push({ id: it.id, ts: ts, inWindow: inWindow, msgStatus: mr.status });
+      await new Promise(z => setTimeout(z, 120)); // suave con el rate limit
+    }
+    return res.json({
+      ok: true, scanned: page.items.length,
+      nextCursorId: page.next ? backfillNextCursor(page.next) : null,
+      matched: results.filter(r => r.inWindow).map(r => r.id),
+      results: results,
+      sampleMsgKeys: sampleMsgKeys, sampleMsg: sampleMsg
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
