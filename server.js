@@ -998,18 +998,23 @@ app.get('/backfill', async (req, res) => {
 //   GET /backfill/scan?token=..&from=YYYY-MM-DD&to=YYYY-MM-DD&cursorId=&limit=40
 //   -> { results:[{id, ts, inWindow}], nextCursorId, scanned, sampleMsgKeys, sampleMsg }
 
-// extrae el timestamp (epoch ms) del objeto mensaje probando varios campos/formatos
+// extrae el timestamp (epoch ms) del objeto mensaje. OJO: los mensajes de Respond.io v2
+// NO traen campo de fecha explicito; el timestamp va codificado en messageId (epoch en
+// MICROSEGUNDOS, ej. 1784052692000000 -> /1000 = ms). Normaliza por magnitud por si acaso.
 function backfillMsgTs(msg) {
   if (!msg) return null;
-  const cands = [msg.timestamp, msg.createdAt, msg.created_at, msg.time, msg.messageTime,
-    msg.sentAt, msg.sent_at, msg.date, msg.updatedAt];
+  const cands = [msg.messageId, msg.timestamp, msg.createdAt, msg.created_at, msg.time,
+    msg.messageTime, msg.sentAt, msg.sent_at, msg.date];
   for (let v of cands) {
     if (v == null) continue;
-    if (typeof v === 'number') return v < 1e12 ? v * 1000 : v; // s -> ms
-    if (typeof v === 'string') {
-      if (/^\d+$/.test(v)) { const n = Number(v); return n < 1e12 ? n * 1000 : n; }
-      const t = Date.parse(v); if (!isNaN(t)) return t;
-    }
+    let n = null;
+    if (typeof v === 'number') n = v;
+    else if (typeof v === 'string' && /^\d+$/.test(v)) n = Number(v);
+    else if (typeof v === 'string') { const t = Date.parse(v); if (!isNaN(t)) return t; continue; }
+    if (n == null || !isFinite(n)) continue;
+    if (n >= 1e15) return Math.floor(n / 1000); // microsegundos -> ms
+    if (n >= 1e12) return n;                     // ya en ms
+    if (n >= 1e9) return n * 1000;              // segundos -> ms
   }
   return null;
 }
@@ -1055,7 +1060,7 @@ app.get('/backfill/scan', async (req, res) => {
       if (i === 0 && newest) { sampleMsg = newest; sampleMsgKeys = Object.keys(newest); }
       const ts = backfillMsgTs(newest);
       const inWindow = ts != null && ts >= fromMs && ts <= toMs;
-      results.push({ id: it.id, ts: ts, inWindow: inWindow, msgStatus: mr.status });
+      results.push({ id: it.id, ts: ts, inWindow: inWindow, msgStatus: mr.status, mid: newest ? newest.messageId : null });
       await new Promise(z => setTimeout(z, 120)); // suave con el rate limit
     }
     return res.json({
