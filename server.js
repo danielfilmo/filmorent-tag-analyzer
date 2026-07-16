@@ -13,6 +13,7 @@ const RESPONDIO_API_KEY = process.env.RESPONDIO_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GOOGLE_SHEETS_URL = process.env.GOOGLE_SHEETS_URL;
+const BACKFILL_TOKEN = process.env.BACKFILL_TOKEN; // v7.4: habilita GET /backfill si esta seteada
 const PORT = process.env.PORT || 3000;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -342,9 +343,9 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     const agentRolesInfo = humans.map(a => {
       const role = getAgentRole(a.name);
       const roleDesc = {
-        'owner': 'dueño del negocio',
-        'admin': 'administración (facturación, cobranza, logística)',
-        'sales': 'ventas y atención al cliente'
+        'owner': 'due√±o del negocio',
+        'admin': 'administraci√≥n (facturaci√≥n, cobranza, log√≠stica)',
+        'sales': 'ventas y atenci√≥n al cliente'
       };
       return a.name + ' (' + (roleDesc[role] || role) + ')';
     }).join(', ');
@@ -395,7 +396,7 @@ Lee TODA la conversacion de principio a fin. Entiende:
 - Que necesitaba el cliente
 - Como respondio el equipo EN CONJUNTO
 - Cual fue el resultado final
-- Las NOTAS INTERNAS son instrucciones del dueño (Daniel Alonso) al equipo. Seguirlas es CORRECTO.
+- Las NOTAS INTERNAS son instrucciones del due√±o (Daniel Alonso) al equipo. Seguirlas es CORRECTO.
 
 === PASO 2: REGLAS CRITICAS DE EVALUACION ===
 
@@ -407,9 +408,9 @@ REGLA 3 - ROLES DIFERENTES: Cada agente tiene un ROL diferente:
 ${agentRolesInfo}
 - Agentes de ADMIN: Evaluar en facturacion, cobranza, logistica. NO penalizar por "no conocer equipos".
 - Agentes de VENTAS: Evaluar en atencion, conocimiento de equipos, cierre de rentas.
-- El DUEÑO: Generalmente da instrucciones internas, no evaluarlo a menos que interactue con el cliente.
+- El DUE√ëO: Generalmente da instrucciones internas, no evaluarlo a menos que interactue con el cliente.
 
-REGLA 4 - NOTAS INTERNAS: Los mensajes marcados "NOTA INTERNA" son instrucciones del dueño al equipo. Si un agente sigue una instruccion interna (ej: "ofrecele la ZVE10"), eso es CORRECTO. No penalizar por "introducir informacion no solicitada" cuando fue una instruccion.
+REGLA 4 - NOTAS INTERNAS: Los mensajes marcados "NOTA INTERNA" son instrucciones del due√±o al equipo. Si un agente sigue una instruccion interna (ej: "ofrecele la ZVE10"), eso es CORRECTO. No penalizar por "introducir informacion no solicitada" cuando fue una instruccion.
 
 REGLA 5 - ENFOCARSE EN LO IMPORTANTE: Evalua lo que REALMENTE importa para el negocio:
 - Se atendio bien al cliente?
@@ -442,7 +443,7 @@ Criterios por agente humano (1-10):
 TAGS A EVALUAR:
 1. "consulta-compra" - Cliente pregunta por COMPRAR equipo (Filmorent solo renta).
 2. "equipo-no-disponible" - Equipo no disponible (no existe O ya rentado).
-3. "incidencia" - Problema, queja, equipo dañado, entrega tarde.
+3. "incidencia" - Problema, queja, equipo da√±ado, entrega tarde.
 4. "renta-perdida" - Cliente queria rentar pero NO se concreto. Causa: "precio", "sin_respuesta_cliente", "tardanza_respuesta", "fechas", "ubicacion", "otro".
 
 Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro):
@@ -672,8 +673,8 @@ IMPORTANTE:
 - Maximo 8-10 lineas
 - Se directo y practico, esto es para que el agente sepa que paso SIN tener que leer todo
 - Si hubo multiples conversaciones/ciclos, resume TODOS, no solo el ultimo
-- Usa formato simple con viñetas
-- Escribe en español
+- Usa formato simple con vi√±etas
+- Escribe en espa√±ol
 
 === HISTORIAL COMPLETO DEL CLIENTE: ${contactName} ===
 ${formattedMessages}
@@ -701,7 +702,7 @@ Genera el resumen ahora:`;
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          text: '🤖 RESUMEN AUTOMATICO (IA)\n━━━━━━━━━━━━━━━━━━━━\n' + summary + '\n━━━━━━━━━━━━━━━━━━━━\n📝 Resumen generado al reabrir conversacion'
+          text: 'ü§ñ RESUMEN AUTOMATICO (IA)\n‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ\n' + summary + '\n‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ\nüìù Resumen generado al reabrir conversacion'
         })
       }
     );
@@ -720,7 +721,7 @@ Genera el resumen ahora:`;
 
 
 // ============================================================
-// v7.3: CALL ENDED — analiza la transcripcion de una llamada
+// v7.3: CALL ENDED ‚Äî analiza la transcripcion de una llamada
 // (Respond.io Voice AI / llamadas) y aplica tags. Si no hay
 // transcript (llamada perdida o sin grabacion), se omite.
 // ============================================================
@@ -847,6 +848,118 @@ app.post('/webhook/call-ended', async (req, res) => {
     console.log('=== DONE CALL: contact=' + contactId + ', call=' + meta.callId + ', tags=' + JSON.stringify(tagsToApply) + ' ===\n');
   } catch (error) {
     console.error('call-ended error: ' + error.message);
+  }
+});
+
+
+// ‚îÄ‚îÄ v7.4 BACKFILL (30-jul-2026) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// Rellena huecos del Log de Conversaciones (ej. 15-jun‚Üí13-jul 2026, cuando el
+// modelo Claude descontinuado rompia el analisis). READ-ONLY: solo ENUMERA los
+// contactId cuyo "ultimo mensaje entrante" cae en el rango, via POST /contact/list
+// (API v2). No reprocesa ni escribe nada aqui ‚Äî de eso se encarga el script local
+// webhook-server/backfill.py, que es resumible (no duplica filas al re-correr).
+//
+// Protegido: requiere la env BACKFILL_TOKEN. Si NO esta seteada, el endpoint esta
+// DESHABILITADO (403). Setea BACKFILL_TOKEN en Render para habilitarlo, corre el
+// backfill, y luego puedes quitarla.
+//   GET /backfill?token=XXX&from=2026-06-15&to=2026-07-13
+//   opcionales: field, valueFormat (ms|iso|s|datetime), probe=1, max (tope, def 3000)
+const BACKFILL_TZ = 'America/Monterrey'; // UTC-6 fijo (Monterrey no observa DST)
+const BACKFILL_FIELD_CANDIDATES = [
+  'lastIncomingMessageTime', 'lastIncomingMessage', 'latestIncomingMessageTime',
+  'lastInboundMessageTime', 'lastContactTime', 'lastMessageTime', 'lastInteraction'
+];
+const BACKFILL_FMT_CANDIDATES = ['ms', 'iso', 's', 'datetime'];
+
+// pagination.next puede ser un cursor pelon o una URL con ?cursorId=... ‚Äî extrae el cursor.
+function backfillNextCursor(next) {
+  if (!next) return null;
+  const s = String(next);
+  const m = s.match(/cursorId=([^&]+)/);
+  return m ? decodeURIComponent(m[1]) : s;
+}
+
+function backfillFmtValue(dateStr, which, fmt) {
+  // dateStr = 'YYYY-MM-DD'; which='from' => inicio de dia, 'to' => fin de dia (MTY, UTC-6)
+  if (fmt === 'datetime') return which === 'to' ? dateStr + ' 23:59' : dateStr + ' 00:00';
+  const iso = (which === 'to' ? dateStr + 'T23:59:59' : dateStr + 'T00:00:00') + '-06:00';
+  const d = new Date(iso);
+  if (fmt === 'ms') return String(d.getTime());
+  if (fmt === 's') return String(Math.floor(d.getTime() / 1000));
+  return d.toISOString(); // iso
+}
+
+async function backfillListPage(field, value, cursorId, limit) {
+  let url = 'https://api.respond.io/v2/contact/list?limit=' + (limit || 100);
+  if (cursorId) url += '&cursorId=' + encodeURIComponent(cursorId);
+  const body = {
+    timezone: BACKFILL_TZ,
+    filter: { $and: [ { category: 'contactField', field: field, operator: 'isTimestampBetween', value: value } ] }
+  };
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const text = await resp.text();
+  let json = null; try { json = JSON.parse(text); } catch (e) {}
+  const items = (json && (json.items || json.data)) || [];
+  const next = json && json.pagination && json.pagination.next;
+  return { status: resp.status, items: Array.isArray(items) ? items : [], next: next || null, text: text };
+}
+
+// Descubre la combinacion (field, valueFormat) que la API acepta (status 200 con items>0).
+async function backfillDiscover(from, to, forceField, forceFmt) {
+  const fields = (forceField ? [forceField] : BACKFILL_FIELD_CANDIDATES);
+  const fmts = (forceFmt ? [forceFmt] : BACKFILL_FMT_CANDIDATES);
+  const log = [];
+  let fallback = null; // combo que dio 200 aunque con 0 items
+  for (const field of fields) {
+    for (const fmt of fmts) {
+      const value = { from: backfillFmtValue(from, 'from', fmt), to: backfillFmtValue(to, 'to', fmt) };
+      try {
+        const r = await backfillListPage(field, value, null, 1);
+        log.push({ field: field, fmt: fmt, status: r.status, items: r.items.length });
+        if (r.status === 200 && r.items.length > 0) return { field: field, fmt: fmt, value: value, log: log };
+        if (r.status === 200 && !fallback) fallback = { field: field, fmt: fmt, value: value };
+      } catch (e) { log.push({ field: field, fmt: fmt, error: e.message }); }
+    }
+  }
+  if (fallback) return { field: fallback.field, fmt: fallback.fmt, value: fallback.value, log: log, empty: true };
+  return { field: null, fmt: null, value: null, log: log };
+}
+
+app.get('/backfill', async (req, res) => {
+  if (!BACKFILL_TOKEN) return res.status(403).json({ error: 'backfill deshabilitado: setea BACKFILL_TOKEN en el env para habilitarlo' });
+  if (req.query.token !== BACKFILL_TOKEN) return res.status(401).json({ error: 'token invalido' });
+  const from = req.query.from, to = req.query.to;
+  if (!from || !to) return res.status(400).json({ error: 'faltan from y to (YYYY-MM-DD)' });
+
+  try {
+    const disc = await backfillDiscover(from, to, req.query.field, req.query.valueFormat);
+    if (req.query.probe === '1') return res.json({ probe: true, chosen: { field: disc.field, fmt: disc.fmt }, log: disc.log, value: disc.value });
+    if (!disc.field) return res.status(502).json({ error: 'ningun field/formato aceptado por la API', log: disc.log });
+
+    const max = parseInt(req.query.max || '3000', 10);
+    const ids = [];
+    let cursorId = null, pages = 0, lastStatus = null;
+    while (ids.length < max && pages < 60) {
+      const r = await backfillListPage(disc.field, disc.value, cursorId, 100);
+      lastStatus = r.status;
+      if (r.status >= 400) break;
+      for (const it of r.items) { if (it && it.id) ids.push(it.id); }
+      pages++;
+      if (!r.next || r.items.length === 0) break;
+      cursorId = backfillNextCursor(r.next);
+    }
+    const uniqueIds = Array.from(new Set(ids));
+    return res.json({
+      ok: true, field: disc.field, valueFormat: disc.fmt, value: disc.value,
+      windowEmpty: !!disc.empty, lastStatus: lastStatus, pages: pages,
+      count: uniqueIds.length, sample: uniqueIds.slice(0, 10), ids: uniqueIds
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
   }
 });
 
