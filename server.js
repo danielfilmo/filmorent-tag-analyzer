@@ -893,6 +893,7 @@ async function backfillListPage(field, value, cursorId, limit) {
   let url = 'https://api.respond.io/v2/contact/list?limit=' + (limit || 100);
   if (cursorId) url += '&cursorId=' + encodeURIComponent(cursorId);
   const body = {
+    search: '', // la API la requiere presente aunque sea vacia (400 si falta)
     timezone: BACKFILL_TZ,
     filter: { $and: [ { category: 'contactField', field: field, operator: 'isTimestampBetween', value: value } ] }
   };
