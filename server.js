@@ -919,7 +919,8 @@ async function backfillDiscover(from, to, forceField, forceFmt) {
       const value = { from: backfillFmtValue(from, 'from', fmt), to: backfillFmtValue(to, 'to', fmt) };
       try {
         const r = await backfillListPage(field, value, null, 1);
-        log.push({ field: field, fmt: fmt, status: r.status, items: r.items.length });
+        log.push({ field: field, fmt: fmt, status: r.status, items: r.items.length,
+          err: r.status >= 400 ? String(r.text || '').slice(0, 250) : undefined });
         if (r.status === 200 && r.items.length > 0) return { field: field, fmt: fmt, value: value, log: log };
         if (r.status === 200 && !fallback) fallback = { field: field, fmt: fmt, value: value };
       } catch (e) { log.push({ field: field, fmt: fmt, error: e.message }); }
