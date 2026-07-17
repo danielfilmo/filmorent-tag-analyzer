@@ -19,6 +19,16 @@ const PORT = process.env.PORT || 3000;
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
+// Extrae de forma robusta el texto de una respuesta de Claude. OJO: claude-sonnet-5 puede
+// devolver content[0] como un bloque NO-texto (ej. razonamiento), dejando content[0].text
+// undefined -> `.trim()` truena y la conversacion NO se loguea. Este helper busca el primer
+// bloque de tipo 'text'; si no hay, devuelve '' (la fila se loguea igual, sin analisis).
+function claudeText(resp) {
+  const blocks = (resp && Array.isArray(resp.content)) ? resp.content : [];
+  const t = blocks.find(b => b && b.type === 'text' && typeof b.text === 'string');
+  return (t ? t.text : '').trim();
+}
+
 // v7.1: Transcribe audio from URL using OpenAI Whisper
 async function transcribeAudio(audioUrl) {
   if (!openai) {
@@ -464,7 +474,7 @@ Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro
       messages: [{ role: 'user', content: analysisPrompt }]
     });
 
-    const analysisText = claudeResponse.content[0].text.trim();
+    const analysisText = claudeText(claudeResponse);
     console.log('Claude analysis: ' + analysisText);
 
     let tagsToApply = [];
@@ -689,7 +699,7 @@ Genera el resumen ahora:`;
       messages: [{ role: 'user', content: summaryPrompt }]
     });
 
-    const summary = claudeResponse.content[0].text.trim();
+    const summary = claudeText(claudeResponse);
     console.log('Summary generated: ' + summary.substring(0, 200) + '...');
 
     // Post summary as internal comment via Respond.io API
@@ -802,7 +812,7 @@ app.post('/webhook/call-ended', async (req, res) => {
       messages: [{ role: 'user', content: analysisPrompt }]
     });
 
-    const analysisText = claudeResponse.content[0].text.trim();
+    const analysisText = claudeText(claudeResponse);
     console.log('Claude call analysis: ' + analysisText);
 
     let tagsToApply = [];
