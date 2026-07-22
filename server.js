@@ -1447,9 +1447,11 @@ let rewardsQrAmbiguous = {};     // codigos con colision (no resolubles)
 async function rewardsBuildQrIndex() {
   const idx = new Map();
   const ambiguous = {};
-  const seen = new Set(); // la paginacion de Booqable REPITE clientes entre paginas (sort con empates) — dedupe por id
+  const seen = new Set(); // dedupe por id, por si acaso
   for (let page = 1; page <= 60; page++) {
-    const d = await booqableGet('/customers?page[size]=100&page[number]=' + page + '&sort=created_at');
+    // sort=number (unico y estable): con sort=created_at los empates hacen que la
+    // paginacion REPITA ~500 clientes y OMITA otros ~500 (verificado 22-jul-2026)
+    const d = await booqableGet('/customers?page[size]=100&page[number]=' + page + '&sort=number');
     const data = d.data || [];
     for (const c of data) {
       if (seen.has(c.id)) continue;
