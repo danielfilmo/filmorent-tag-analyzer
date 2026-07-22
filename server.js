@@ -353,9 +353,9 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     const agentRolesInfo = humans.map(a => {
       const role = getAgentRole(a.name);
       const roleDesc = {
-        'owner': 'due‚àö¬±o del negocio',
-        'admin': 'administraci‚àö‚â•n (facturaci‚àö‚â•n, cobranza, log‚àö‚â†stica)',
-        'sales': 'ventas y atenci‚àö‚â•n al cliente'
+        'owner': 'due√±o del negocio',
+        'admin': 'administraci√≥n (facturaci√≥n, cobranza, log√≠stica)',
+        'sales': 'ventas y atenci√≥n al cliente'
       };
       return a.name + ' (' + (roleDesc[role] || role) + ')';
     }).join(', ');
@@ -406,7 +406,7 @@ Lee TODA la conversacion de principio a fin. Entiende:
 - Que necesitaba el cliente
 - Como respondio el equipo EN CONJUNTO
 - Cual fue el resultado final
-- Las NOTAS INTERNAS son instrucciones del due‚àö¬±o (Daniel Alonso) al equipo. Seguirlas es CORRECTO.
+- Las NOTAS INTERNAS son instrucciones del due√±o (Daniel Alonso) al equipo. Seguirlas es CORRECTO.
 
 === PASO 2: REGLAS CRITICAS DE EVALUACION ===
 
@@ -418,9 +418,9 @@ REGLA 3 - ROLES DIFERENTES: Cada agente tiene un ROL diferente:
 ${agentRolesInfo}
 - Agentes de ADMIN: Evaluar en facturacion, cobranza, logistica. NO penalizar por "no conocer equipos".
 - Agentes de VENTAS: Evaluar en atencion, conocimiento de equipos, cierre de rentas.
-- El DUE‚àö√´O: Generalmente da instrucciones internas, no evaluarlo a menos que interactue con el cliente.
+- El DUE√ëO: Generalmente da instrucciones internas, no evaluarlo a menos que interactue con el cliente.
 
-REGLA 4 - NOTAS INTERNAS: Los mensajes marcados "NOTA INTERNA" son instrucciones del due‚àö¬±o al equipo. Si un agente sigue una instruccion interna (ej: "ofrecele la ZVE10"), eso es CORRECTO. No penalizar por "introducir informacion no solicitada" cuando fue una instruccion.
+REGLA 4 - NOTAS INTERNAS: Los mensajes marcados "NOTA INTERNA" son instrucciones del due√±o al equipo. Si un agente sigue una instruccion interna (ej: "ofrecele la ZVE10"), eso es CORRECTO. No penalizar por "introducir informacion no solicitada" cuando fue una instruccion.
 
 REGLA 5 - ENFOCARSE EN LO IMPORTANTE: Evalua lo que REALMENTE importa para el negocio:
 - Se atendio bien al cliente?
@@ -453,7 +453,7 @@ Criterios por agente humano (1-10):
 TAGS A EVALUAR:
 1. "consulta-compra" - Cliente pregunta por COMPRAR equipo (Filmorent solo renta).
 2. "equipo-no-disponible" - Equipo no disponible (no existe O ya rentado).
-3. "incidencia" - Problema, queja, equipo da‚àö¬±ado, entrega tarde.
+3. "incidencia" - Problema, queja, equipo da√±ado, entrega tarde.
 4. "renta-perdida" - Cliente queria rentar pero NO se concreto. Causa: "precio", "sin_respuesta_cliente", "tardanza_respuesta", "fechas", "ubicacion", "otro".
 
 Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro):
@@ -683,8 +683,8 @@ IMPORTANTE:
 - Maximo 8-10 lineas
 - Se directo y practico, esto es para que el agente sepa que paso SIN tener que leer todo
 - Si hubo multiples conversaciones/ciclos, resume TODOS, no solo el ultimo
-- Usa formato simple con vi‚àö¬±etas
-- Escribe en espa‚àö¬±ol
+- Usa formato simple con vi√±etas
+- Escribe en espa√±ol
 
 === HISTORIAL COMPLETO DEL CLIENTE: ${contactName} ===
 ${formattedMessages}
@@ -712,7 +712,7 @@ Genera el resumen ahora:`;
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          text: 'Ô£ø√º¬ß√± RESUMEN AUTOMATICO (IA)\n‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö\n' + summary + '\n‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö\nÔ£ø√º√¨√π Resumen generado al reabrir conversacion'
+          text: 'ü§ñ RESUMEN AUTOMATICO (IA)\n‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ\n' + summary + '\n‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ\nüìù Resumen generado al reabrir conversacion'
         })
       }
     );
@@ -731,7 +731,7 @@ Genera el resumen ahora:`;
 
 
 // ============================================================
-// v7.3: CALL ENDED ‚Äö√Ñ√Æ analiza la transcripcion de una llamada
+// v7.3: CALL ENDED ‚Äî analiza la transcripcion de una llamada
 // (Respond.io Voice AI / llamadas) y aplica tags. Si no hay
 // transcript (llamada perdida o sin grabacion), se omite.
 // ============================================================
@@ -862,11 +862,11 @@ app.post('/webhook/call-ended', async (req, res) => {
 });
 
 
-// ‚Äö√Æ√Ñ‚Äö√Æ√Ñ v7.4 BACKFILL (30-jul-2026) ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ
-// Rellena huecos del Log de Conversaciones (ej. 15-jun‚Äö√ú√≠13-jul 2026, cuando el
+// ‚îÄ‚îÄ v7.4 BACKFILL (30-jul-2026) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// Rellena huecos del Log de Conversaciones (ej. 15-jun‚Üí13-jul 2026, cuando el
 // modelo Claude descontinuado rompia el analisis). READ-ONLY: solo ENUMERA los
 // contactId cuyo "ultimo mensaje entrante" cae en el rango, via POST /contact/list
-// (API v2). No reprocesa ni escribe nada aqui ‚Äö√Ñ√Æ de eso se encarga el script local
+// (API v2). No reprocesa ni escribe nada aqui ‚Äî de eso se encarga el script local
 // webhook-server/backfill.py, que es resumible (no duplica filas al re-correr).
 //
 // Protegido: requiere la env BACKFILL_TOKEN. Si NO esta seteada, el endpoint esta
@@ -881,7 +881,7 @@ const BACKFILL_FIELD_CANDIDATES = [
 ];
 const BACKFILL_FMT_CANDIDATES = ['ms', 'iso', 's', 'datetime'];
 
-// pagination.next puede ser un cursor pelon o una URL con ?cursorId=... ‚Äö√Ñ√Æ extrae el cursor.
+// pagination.next puede ser un cursor pelon o una URL con ?cursorId=... ‚Äî extrae el cursor.
 function backfillNextCursor(next) {
   if (!next) return null;
   const s = String(next);
@@ -999,7 +999,7 @@ app.get('/backfill', async (req, res) => {
   }
 });
 
-// ‚Äö√Æ√Ñ‚Äö√Æ√Ñ v7.5 BACKFILL SCAN (para el hueco COMPLETO, incl. clientes recurrentes) ‚Äö√Æ√Ñ‚Äö√Æ√Ñ
+// ‚îÄ‚îÄ v7.5 BACKFILL SCAN (para el hueco COMPLETO, incl. clientes recurrentes) ‚îÄ‚îÄ
 // La API publica solo deja filtrar contactos por createdAt (no por "ultimo mensaje").
 // Para atrapar tambien a los recurrentes activos en la ventana, este endpoint pagina
 // TODOS los contactos (por createdAt <= to) y para cada uno mira el timestamp de su
@@ -1088,9 +1088,9 @@ app.get('/backfill/scan', async (req, res) => {
 
 
 // ============================================================
-// v8.0 FILMORENT REWARDS (Pilar 6) ‚Äî 22-jul-2026
+// v8.0 FILMORENT REWARDS (Pilar 6) — 22-jul-2026
 // Proxy server-side de Booqable para el portal rewards.filmorent.com.
-// La key de Booqable vive en env (BOOQABLE_API_KEY) ‚Äî NUNCA en el frontend.
+// La key de Booqable vive en env (BOOQABLE_API_KEY) — NUNCA en el frontend.
 //
 //   GET  /rewards/member?email=...  -> puntos, tier-data, historial (calculado
 //                                      de Booqable EN VIVO, excluyendo lineas
@@ -1099,18 +1099,18 @@ app.get('/backfill/scan', async (req, res) => {
 //   POST /rewards/scan              -> resuelve QR de miembro y registra scan
 //
 // Persistencia: Google Sheet "Rewards Ledger" via Apps Script (doPost para
-// escribir canjes/scans, doGet para leer canjes por customer) ‚Äî mismo patron
+// escribir canjes/scans, doGet para leer canjes por customer) — mismo patron
 // logToGoogleSheets que el Log de Conversaciones. Env: REWARDS_SHEETS_URL.
 //
 // Reglas de negocio (pilar6-rewards/README.md):
 //   - 1 pt / $100 MXN. Base = grand_total_in_cents (sin IVA) de ordenes con
-//     status distinto de draft/concept/canceled ‚Äî verificado que la suma
+//     status distinto de draft/concept/canceled — verificado que la suma
 //     coincide EXACTO con customer.revenue_in_cents.
 //   - La linea del producto ELSEPC no genera puntos (subrenta: 90% no es
 //     ingreso nuestro). El precio de linea viene CON IVA, asi que se convierte
 //     a base sin IVA con el ratio grand_total/grand_total_with_tax de su orden.
 //   - QR determinstico del customer_id, formato FLM-XX-YYYY-XXNX. Hash FNV-1a
-//     32-bit (el hash del prototipo ‚Äî suma de charCodes ‚Äî solo producia ~30k
+//     32-bit (el hash del prototipo — suma de charCodes — solo producia ~30k
 //     valores => colisiones casi seguras entre ~2k miembros).
 // ============================================================
 
@@ -1119,13 +1119,13 @@ const BOOQABLE_BASE = process.env.BOOQABLE_BASE || 'https://filmorent-sa-de-cv.b
 const REWARDS_SHEETS_URL = process.env.REWARDS_SHEETS_URL; // Apps Script del Rewards Ledger
 const REWARDS_STAFF_PIN = process.env.REWARDS_STAFF_PIN;   // opcional: PIN para /rewards/scan
 
-// Catalogo v1 (solo descuentos). El portal lo consume de aqui ‚Äî una sola fuente.
+// Catalogo v1 (solo descuentos). El portal lo consume de aqui — una sola fuente.
 const REWARDS_CATALOG = [
-  { id: 1, name: '5% descuento en tu pr√≥xima renta', points: 100, value: 5 },
-  { id: 2, name: '10% descuento en tu pr√≥xima renta', points: 250, value: 10 },
-  { id: 3, name: '15% descuento en tu pr√≥xima renta', points: 500, value: 15 },
-  { id: 4, name: '20% descuento en tu pr√≥xima renta', points: 800, value: 20 },
-  { id: 5, name: '25% descuento en tu pr√≥xima renta', points: 1200, value: 25 }
+  { id: 1, name: '5% descuento en tu próxima renta', points: 100, value: 5 },
+  { id: 2, name: '10% descuento en tu próxima renta', points: 250, value: 10 },
+  { id: 3, name: '15% descuento en tu próxima renta', points: 500, value: 15 },
+  { id: 4, name: '20% descuento en tu próxima renta', points: 800, value: 20 },
+  { id: 5, name: '25% descuento en tu próxima renta', points: 1200, value: 25 }
 ];
 
 const REWARDS_TIERS = [
@@ -1141,7 +1141,7 @@ const REWARDS_ORIGINS = [
   'https://www.filmorent.com'
 ];
 // Rate limit simple por IP (el endpoint es publico y devuelve datos de miembro):
-// 30 requests por ventana de 5 min. En memoria ‚Äî suficiente para un solo dyno.
+// 30 requests por ventana de 5 min. En memoria — suficiente para un solo dyno.
 const rewardsRate = new Map();
 function rewardsRateOk(ip) {
   const now = Date.now();
@@ -1365,7 +1365,7 @@ async function rewardsBuildMember(customer) {
   };
 }
 
-// ‚îÄ‚îÄ GET /rewards/member?email= ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── GET /rewards/member?email= ──────────────────────────────
 app.get('/rewards/member', async (req, res) => {
   const email = String(req.query.email || '').trim().toLowerCase();
   if (!email || email.indexOf('@') === -1) {
@@ -1384,7 +1384,7 @@ app.get('/rewards/member', async (req, res) => {
   }
 });
 
-// ‚îÄ‚îÄ POST /rewards/redeem  {email, reward_id} ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── POST /rewards/redeem  {email, reward_id} ────────────────
 app.post('/rewards/redeem', async (req, res) => {
   const email = String((req.body || {}).email || '').trim().toLowerCase();
   const rewardId = parseInt((req.body || {}).reward_id, 10);
@@ -1429,7 +1429,7 @@ app.post('/rewards/redeem', async (req, res) => {
       folio: folio,
       reward: reward,
       points_available: available - reward.points,
-      instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu pr√≥xima renta para aplicar tu ' + reward.value + '% de descuento.'
+      instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu próxima renta para aplicar tu ' + reward.value + '% de descuento.'
     });
   } catch (e) {
     console.error('[rewards] redeem error: ' + e.message);
@@ -1437,7 +1437,7 @@ app.post('/rewards/redeem', async (req, res) => {
   }
 });
 
-// ‚îÄ‚îÄ POST /rewards/scan  {code, pin?, order_number?, staff_name?} ‚îÄ‚îÄ
+// ── POST /rewards/scan  {code, pin?, order_number?, staff_name?} ──
 // Resuelve el QR de miembro contra un indice qr->customer construido paginando
 // /customers (cache 12h; se reconstruye si el codigo no aparece).
 let rewardsQrIndex = null;       // Map code -> {id, name, email, number}
