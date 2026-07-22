@@ -1447,15 +1447,21 @@ let rewardsQrAmbiguous = {};     // codigos con colision (no resolubles)
 async function rewardsBuildQrIndex() {
   const idx = new Map();
   const ambiguous = {};
+  const seen = new Set(); // la paginacion de Booqable REPITE clientes entre paginas (sort con empates) — dedupe por id
   for (let page = 1; page <= 60; page++) {
     const d = await booqableGet('/customers?page[size]=100&page[number]=' + page + '&sort=created_at');
     const data = d.data || [];
     for (const c of data) {
+      if (seen.has(c.id)) continue;
+      seen.add(c.id);
       const a = c.attributes || {};
       const code = rewardsQrCode(c.id);
       if (idx.has(code)) {
-        ambiguous[code] = true;
-        console.error('[rewards] COLISION de QR ' + code + ': ' + idx.get(code).id + ' vs ' + c.id);
+        // colision REAL solo si son clientes distintos
+        if (idx.get(code).id !== c.id) {
+          ambiguous[code] = true;
+          console.error('[rewards] COLISION de QR ' + code + ': ' + idx.get(code).id + ' vs ' + c.id);
+        }
         continue;
       }
       idx.set(code, { id: c.id, name: rewardsCleanName(a.name), email: a.email || '', number: a.number });
