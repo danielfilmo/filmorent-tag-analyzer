@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v7.2.1', whisper: !!openai, autoSummary: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY }));
 
 function extractContactId(body) {
   return (
@@ -353,9 +353,9 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     const agentRolesInfo = humans.map(a => {
       const role = getAgentRole(a.name);
       const roleDesc = {
-        'owner': 'due√±o del negocio',
-        'admin': 'administraci√≥n (facturaci√≥n, cobranza, log√≠stica)',
-        'sales': 'ventas y atenci√≥n al cliente'
+        'owner': 'due‚àö¬±o del negocio',
+        'admin': 'administraci‚àö‚â•n (facturaci‚àö‚â•n, cobranza, log‚àö‚â†stica)',
+        'sales': 'ventas y atenci‚àö‚â•n al cliente'
       };
       return a.name + ' (' + (roleDesc[role] || role) + ')';
     }).join(', ');
@@ -406,7 +406,7 @@ Lee TODA la conversacion de principio a fin. Entiende:
 - Que necesitaba el cliente
 - Como respondio el equipo EN CONJUNTO
 - Cual fue el resultado final
-- Las NOTAS INTERNAS son instrucciones del due√±o (Daniel Alonso) al equipo. Seguirlas es CORRECTO.
+- Las NOTAS INTERNAS son instrucciones del due‚àö¬±o (Daniel Alonso) al equipo. Seguirlas es CORRECTO.
 
 === PASO 2: REGLAS CRITICAS DE EVALUACION ===
 
@@ -418,9 +418,9 @@ REGLA 3 - ROLES DIFERENTES: Cada agente tiene un ROL diferente:
 ${agentRolesInfo}
 - Agentes de ADMIN: Evaluar en facturacion, cobranza, logistica. NO penalizar por "no conocer equipos".
 - Agentes de VENTAS: Evaluar en atencion, conocimiento de equipos, cierre de rentas.
-- El DUE√ëO: Generalmente da instrucciones internas, no evaluarlo a menos que interactue con el cliente.
+- El DUE‚àö√´O: Generalmente da instrucciones internas, no evaluarlo a menos que interactue con el cliente.
 
-REGLA 4 - NOTAS INTERNAS: Los mensajes marcados "NOTA INTERNA" son instrucciones del due√±o al equipo. Si un agente sigue una instruccion interna (ej: "ofrecele la ZVE10"), eso es CORRECTO. No penalizar por "introducir informacion no solicitada" cuando fue una instruccion.
+REGLA 4 - NOTAS INTERNAS: Los mensajes marcados "NOTA INTERNA" son instrucciones del due‚àö¬±o al equipo. Si un agente sigue una instruccion interna (ej: "ofrecele la ZVE10"), eso es CORRECTO. No penalizar por "introducir informacion no solicitada" cuando fue una instruccion.
 
 REGLA 5 - ENFOCARSE EN LO IMPORTANTE: Evalua lo que REALMENTE importa para el negocio:
 - Se atendio bien al cliente?
@@ -453,7 +453,7 @@ Criterios por agente humano (1-10):
 TAGS A EVALUAR:
 1. "consulta-compra" - Cliente pregunta por COMPRAR equipo (Filmorent solo renta).
 2. "equipo-no-disponible" - Equipo no disponible (no existe O ya rentado).
-3. "incidencia" - Problema, queja, equipo da√±ado, entrega tarde.
+3. "incidencia" - Problema, queja, equipo da‚àö¬±ado, entrega tarde.
 4. "renta-perdida" - Cliente queria rentar pero NO se concreto. Causa: "precio", "sin_respuesta_cliente", "tardanza_respuesta", "fechas", "ubicacion", "otro".
 
 Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro):
@@ -683,8 +683,8 @@ IMPORTANTE:
 - Maximo 8-10 lineas
 - Se directo y practico, esto es para que el agente sepa que paso SIN tener que leer todo
 - Si hubo multiples conversaciones/ciclos, resume TODOS, no solo el ultimo
-- Usa formato simple con vi√±etas
-- Escribe en espa√±ol
+- Usa formato simple con vi‚àö¬±etas
+- Escribe en espa‚àö¬±ol
 
 === HISTORIAL COMPLETO DEL CLIENTE: ${contactName} ===
 ${formattedMessages}
@@ -712,7 +712,7 @@ Genera el resumen ahora:`;
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          text: 'ü§ñ RESUMEN AUTOMATICO (IA)\n‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ\n' + summary + '\n‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ\nüìù Resumen generado al reabrir conversacion'
+          text: 'Ô£ø√º¬ß√± RESUMEN AUTOMATICO (IA)\n‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö\n' + summary + '\n‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö\nÔ£ø√º√¨√π Resumen generado al reabrir conversacion'
         })
       }
     );
@@ -731,7 +731,7 @@ Genera el resumen ahora:`;
 
 
 // ============================================================
-// v7.3: CALL ENDED ‚Äî analiza la transcripcion de una llamada
+// v7.3: CALL ENDED ‚Äö√Ñ√Æ analiza la transcripcion de una llamada
 // (Respond.io Voice AI / llamadas) y aplica tags. Si no hay
 // transcript (llamada perdida o sin grabacion), se omite.
 // ============================================================
@@ -862,11 +862,11 @@ app.post('/webhook/call-ended', async (req, res) => {
 });
 
 
-// ‚îÄ‚îÄ v7.4 BACKFILL (30-jul-2026) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-// Rellena huecos del Log de Conversaciones (ej. 15-jun‚Üí13-jul 2026, cuando el
+// ‚Äö√Æ√Ñ‚Äö√Æ√Ñ v7.4 BACKFILL (30-jul-2026) ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ
+// Rellena huecos del Log de Conversaciones (ej. 15-jun‚Äö√ú√≠13-jul 2026, cuando el
 // modelo Claude descontinuado rompia el analisis). READ-ONLY: solo ENUMERA los
 // contactId cuyo "ultimo mensaje entrante" cae en el rango, via POST /contact/list
-// (API v2). No reprocesa ni escribe nada aqui ‚Äî de eso se encarga el script local
+// (API v2). No reprocesa ni escribe nada aqui ‚Äö√Ñ√Æ de eso se encarga el script local
 // webhook-server/backfill.py, que es resumible (no duplica filas al re-correr).
 //
 // Protegido: requiere la env BACKFILL_TOKEN. Si NO esta seteada, el endpoint esta
@@ -881,7 +881,7 @@ const BACKFILL_FIELD_CANDIDATES = [
 ];
 const BACKFILL_FMT_CANDIDATES = ['ms', 'iso', 's', 'datetime'];
 
-// pagination.next puede ser un cursor pelon o una URL con ?cursorId=... ‚Äî extrae el cursor.
+// pagination.next puede ser un cursor pelon o una URL con ?cursorId=... ‚Äö√Ñ√Æ extrae el cursor.
 function backfillNextCursor(next) {
   if (!next) return null;
   const s = String(next);
@@ -999,7 +999,7 @@ app.get('/backfill', async (req, res) => {
   }
 });
 
-// ‚îÄ‚îÄ v7.5 BACKFILL SCAN (para el hueco COMPLETO, incl. clientes recurrentes) ‚îÄ‚îÄ
+// ‚Äö√Æ√Ñ‚Äö√Æ√Ñ v7.5 BACKFILL SCAN (para el hueco COMPLETO, incl. clientes recurrentes) ‚Äö√Æ√Ñ‚Äö√Æ√Ñ
 // La API publica solo deja filtrar contactos por createdAt (no por "ultimo mensaje").
 // Para atrapar tambien a los recurrentes activos en la ventana, este endpoint pagina
 // TODOS los contactos (por createdAt <= to) y para cada uno mira el timestamp de su
@@ -1086,8 +1086,435 @@ app.get('/backfill/scan', async (req, res) => {
 });
 
 
+
+// ============================================================
+// v8.0 FILMORENT REWARDS (Pilar 6) ‚Äî 22-jul-2026
+// Proxy server-side de Booqable para el portal rewards.filmorent.com.
+// La key de Booqable vive en env (BOOQABLE_API_KEY) ‚Äî NUNCA en el frontend.
+//
+//   GET  /rewards/member?email=...  -> puntos, tier-data, historial (calculado
+//                                      de Booqable EN VIVO, excluyendo lineas
+//                                      ELSEPC) menos canjes del Ledger
+//   POST /rewards/redeem            -> valida saldo y registra canje en Ledger
+//   POST /rewards/scan              -> resuelve QR de miembro y registra scan
+//
+// Persistencia: Google Sheet "Rewards Ledger" via Apps Script (doPost para
+// escribir canjes/scans, doGet para leer canjes por customer) ‚Äî mismo patron
+// logToGoogleSheets que el Log de Conversaciones. Env: REWARDS_SHEETS_URL.
+//
+// Reglas de negocio (pilar6-rewards/README.md):
+//   - 1 pt / $100 MXN. Base = grand_total_in_cents (sin IVA) de ordenes con
+//     status distinto de draft/concept/canceled ‚Äî verificado que la suma
+//     coincide EXACTO con customer.revenue_in_cents.
+//   - La linea del producto ELSEPC no genera puntos (subrenta: 90% no es
+//     ingreso nuestro). El precio de linea viene CON IVA, asi que se convierte
+//     a base sin IVA con el ratio grand_total/grand_total_with_tax de su orden.
+//   - QR determinstico del customer_id, formato FLM-XX-YYYY-XXNX. Hash FNV-1a
+//     32-bit (el hash del prototipo ‚Äî suma de charCodes ‚Äî solo producia ~30k
+//     valores => colisiones casi seguras entre ~2k miembros).
+// ============================================================
+
+const BOOQABLE_API_KEY = process.env.BOOQABLE_API_KEY;
+const BOOQABLE_BASE = process.env.BOOQABLE_BASE || 'https://filmorent-sa-de-cv.booqable.com/api/4';
+const REWARDS_SHEETS_URL = process.env.REWARDS_SHEETS_URL; // Apps Script del Rewards Ledger
+const REWARDS_STAFF_PIN = process.env.REWARDS_STAFF_PIN;   // opcional: PIN para /rewards/scan
+
+// Catalogo v1 (solo descuentos). El portal lo consume de aqui ‚Äî una sola fuente.
+const REWARDS_CATALOG = [
+  { id: 1, name: '5% descuento en tu pr√≥xima renta', points: 100, value: 5 },
+  { id: 2, name: '10% descuento en tu pr√≥xima renta', points: 250, value: 10 },
+  { id: 3, name: '15% descuento en tu pr√≥xima renta', points: 500, value: 15 },
+  { id: 4, name: '20% descuento en tu pr√≥xima renta', points: 800, value: 20 },
+  { id: 5, name: '25% descuento en tu pr√≥xima renta', points: 1200, value: 25 }
+];
+
+const REWARDS_TIERS = [
+  { name: 'Bronce', min: 0, max: 499, discount: 0 },
+  { name: 'Plata', min: 500, max: 1499, discount: 5 },
+  { name: 'Oro', min: 1500, max: null, discount: 10 }
+];
+
+// CORS solo para /rewards/* (el portal vive en otro dominio).
+const REWARDS_ORIGINS = [
+  'https://rewards.filmorent.com',
+  'https://filmorent.com',
+  'https://www.filmorent.com'
+];
+// Rate limit simple por IP (el endpoint es publico y devuelve datos de miembro):
+// 30 requests por ventana de 5 min. En memoria ‚Äî suficiente para un solo dyno.
+const rewardsRate = new Map();
+function rewardsRateOk(ip) {
+  const now = Date.now();
+  let b = rewardsRate.get(ip);
+  if (!b || now - b.start > 5 * 60 * 1000) { b = { start: now, n: 0 }; rewardsRate.set(ip, b); }
+  b.n++;
+  if (rewardsRate.size > 5000) rewardsRate.clear(); // tope de memoria
+  return b.n <= 30;
+}
+
+app.use('/rewards', (req, res, next) => {
+  const origin = req.headers.origin || '';
+  if (REWARDS_ORIGINS.includes(origin) || /^http:\/\/localhost(:\d+)?$/.test(origin) || origin === 'null') {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (!BOOQABLE_API_KEY) return res.status(503).json({ ok: false, error: 'rewards deshabilitado: falta BOOQABLE_API_KEY en el env' });
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || 'desconocida';
+  if (!rewardsRateOk(ip)) return res.status(429).json({ ok: false, error: 'demasiadas solicitudes, espera unos minutos' });
+  next();
+});
+
+// GET a Booqable con retry simple en 429.
+async function booqableGet(pathWithQuery, attempt) {
+  const r = await fetch(BOOQABLE_BASE + pathWithQuery, {
+    headers: { 'Authorization': 'Bearer ' + BOOQABLE_API_KEY, 'Accept': 'application/json' }
+  });
+  if (r.status === 429 && (attempt || 0) < 2) {
+    const ra = parseInt(r.headers.get('retry-after') || '2', 10);
+    await new Promise(z => setTimeout(z, (ra || 2) * 1000));
+    return booqableGet(pathWithQuery, (attempt || 0) + 1);
+  }
+  if (!r.ok) {
+    const body = await r.text().catch(() => '');
+    const err = new Error('Booqable ' + r.status + ': ' + body.slice(0, 200));
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
+}
+
+// QR de miembro: FLM-XX-YYYY-XXNX, deterministico del customer_id (FNV-1a 32-bit).
+function rewardsQrCode(customerId) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < customerId.length; i++) {
+    h ^= customerId.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  const L = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // sin I/O (se confunden con 1/0)
+  const a = L[h % 24];
+  const b = L[Math.floor(h / 24) % 24];
+  const year = 2025 + (Math.floor(h / 576) % 2);
+  const c = L[Math.floor(h / 1152) % 24];
+  const n = Math.floor(h / 27648) % 10;
+  const d = L[Math.floor(h / 276480) % 24];
+  const e = Math.floor(h / 6635520) % 9;
+  return 'FLM-' + a + b + '-' + year + '-' + c + n + d + e;
+}
+
+function rewardsTierFor(points) {
+  for (let i = REWARDS_TIERS.length - 1; i >= 0; i--) {
+    if (points >= REWARDS_TIERS[i].min) return REWARDS_TIERS[i];
+  }
+  return REWARDS_TIERS[0];
+}
+
+// Busca el customer por email exacto en Booqable. null si no existe.
+async function rewardsFindCustomer(email) {
+  const d = await booqableGet('/customers?filter[email]=' + encodeURIComponent(email) + '&page[size]=1');
+  const c = (d.data || [])[0];
+  return c || null;
+}
+
+// Calcula puntos ganados + historial de un customer, excluyendo lineas ELSEPC.
+// Verificado contra Booqable real: sum(grand_total sin draft) === revenue_in_cents.
+async function rewardsComputeEarned(customerId) {
+  // 1) todas las ordenes del cliente
+  const orders = [];
+  for (let page = 1; page <= 10; page++) {
+    const od = await booqableGet('/orders?filter[customer_id]=' + customerId +
+      '&sort=-created_at&page[size]=100&page[number]=' + page);
+    const data = od.data || [];
+    orders.push(...data);
+    if (data.length < 100) break;
+  }
+  const countable = orders.filter(o => {
+    const st = (o.attributes || {}).status;
+    return st !== 'draft' && st !== 'concept' && st !== 'canceled';
+  });
+
+  // 2) lineas ELSEPC de esas ordenes, en lotes de 25 order_ids
+  const elsepcByOrder = {};
+  const ids = countable.map(o => o.id);
+  for (let i = 0; i < ids.length; i += 25) {
+    const batch = ids.slice(i, i + 25).join(',');
+    for (let lpage = 1; lpage <= 10; lpage++) {
+      const ld = await booqableGet('/lines?filter[order_id]=' + batch +
+        '&page[size]=100&page[number]=' + lpage);
+      const data = ld.data || [];
+      for (const l of data) {
+        const la = l.attributes || {};
+        if (la.archived) continue;
+        if (((la.title || '').toLowerCase()).indexOf('elsepc') === -1) continue;
+        elsepcByOrder[la.order_id] = (elsepcByOrder[la.order_id] || 0) + (la.price_in_cents || 0);
+      }
+      if (data.length < 100) break;
+    }
+  }
+
+  // 3) base de puntos por orden = grand_total - ELSEPC (convertido a base sin IVA)
+  let totalBaseCents = 0;
+  let totalElsepcCents = 0;
+  const orderRows = countable.map(o => {
+    const a = o.attributes || {};
+    const g = a.grand_total_in_cents || 0;
+    const gt = a.grand_total_with_tax_in_cents || 0;
+    const elWithTax = elsepcByOrder[o.id] || 0;
+    const ratio = gt ? (g / gt) : 1;
+    const elBase = Math.min(Math.round(elWithTax * ratio), g);
+    totalBaseCents += g;
+    totalElsepcCents += elBase;
+    return {
+      id: o.id,
+      number: a.number,
+      status: a.status,
+      total_cents: g,
+      total_with_tax_cents: gt,
+      elsepc_excluded_cents: elBase,
+      points: Math.floor((g - elBase) / 100 / 100),
+      item_count: a.item_count || 0,
+      starts_at: a.starts_at,
+      stops_at: a.stops_at,
+      created_at: a.created_at
+    };
+  });
+
+  const pointsBaseCents = totalBaseCents - totalElsepcCents;
+  return {
+    orders: orderRows,
+    revenue_cents: totalBaseCents,
+    elsepc_excluded_cents: totalElsepcCents,
+    points_earned: Math.floor(pointsBaseCents / 100 / 100)
+  };
+}
+
+// Lee del Ledger (Apps Script doGet) los canjes de un customer.
+// Devuelve null si el Ledger no esta configurado o fallo (degradar con flag).
+async function rewardsLedgerSummary(customerId) {
+  if (!REWARDS_SHEETS_URL) return null;
+  try {
+    const r = await fetch(REWARDS_SHEETS_URL + '?action=member&customer_id=' + encodeURIComponent(customerId), { redirect: 'follow' });
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    if (!j || j.ok === false) return null;
+    return { redeemed_points: j.redeemed_points || 0, redemptions: j.redemptions || [] };
+  } catch (e) {
+    console.error('rewards ledger read error: ' + e.message);
+    return null;
+  }
+}
+
+// Escribe una fila al Ledger (Apps Script doPost). true/false.
+async function rewardsLedgerWrite(row) {
+  if (!REWARDS_SHEETS_URL) return false;
+  try {
+    const r = await fetch(REWARDS_SHEETS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(row),
+      redirect: 'follow'
+    });
+    if (!r.ok) { console.error('rewards ledger write failed: ' + r.status); return false; }
+    const j = await r.json().catch(() => null);
+    return !j || j.ok !== false;
+  } catch (e) {
+    console.error('rewards ledger write error: ' + e.message);
+    return false;
+  }
+}
+
+function rewardsCleanName(name) {
+  return (name || '').split('/')[0].trim();
+}
+
+// Arma la respuesta completa de miembro (usada por /member y /scan).
+async function rewardsBuildMember(customer) {
+  const a = customer.attributes || {};
+  const earned = await rewardsComputeEarned(customer.id);
+  const ledger = await rewardsLedgerSummary(customer.id);
+  const redeemed = ledger ? ledger.redeemed_points : 0;
+  const available = Math.max(0, earned.points_earned - redeemed);
+  const tier = rewardsTierFor(available);
+  return {
+    member: {
+      customer_id: customer.id,
+      name: rewardsCleanName(a.name),
+      full_name: a.name || '',
+      email: a.email || '',
+      member_id: 'FLM-' + String(a.number || '0').padStart(5, '0'),
+      qr_code: rewardsQrCode(customer.id),
+      member_since: a.created_at,
+      last_order_at: a.last_order_at || a.latest_order_at || null,
+      order_count: a.order_count || 0,
+      avg_order_cents: a.average_order_value_in_cents || 0
+    },
+    points: {
+      earned: earned.points_earned,
+      redeemed: redeemed,
+      available: available,
+      revenue_cents: earned.revenue_cents,
+      elsepc_excluded_cents: earned.elsepc_excluded_cents
+    },
+    tier: { name: tier.name, discount: tier.discount },
+    orders: earned.orders,
+    redemptions: ledger ? ledger.redemptions : [],
+    catalog: REWARDS_CATALOG,
+    ledger_ok: !!ledger
+  };
+}
+
+// ‚îÄ‚îÄ GET /rewards/member?email= ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+app.get('/rewards/member', async (req, res) => {
+  const email = String(req.query.email || '').trim().toLowerCase();
+  if (!email || email.indexOf('@') === -1) {
+    return res.status(400).json({ ok: false, error: 'email invalido' });
+  }
+  try {
+    const customer = await rewardsFindCustomer(email);
+    if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
+    const out = await rewardsBuildMember(customer);
+    console.log('[rewards] member ' + email + ' -> ' + out.points.available + ' pts disponibles (' +
+      out.points.earned + ' ganados, ' + out.points.redeemed + ' canjeados, ledger=' + out.ledger_ok + ')');
+    return res.json(Object.assign({ ok: true }, out));
+  } catch (e) {
+    console.error('[rewards] member error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error consultando Booqable, intenta de nuevo' });
+  }
+});
+
+// ‚îÄ‚îÄ POST /rewards/redeem  {email, reward_id} ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+app.post('/rewards/redeem', async (req, res) => {
+  const email = String((req.body || {}).email || '').trim().toLowerCase();
+  const rewardId = parseInt((req.body || {}).reward_id, 10);
+  if (!email || email.indexOf('@') === -1) return res.status(400).json({ ok: false, error: 'email invalido' });
+  const reward = REWARDS_CATALOG.find(r => r.id === rewardId);
+  if (!reward) return res.status(400).json({ ok: false, error: 'recompensa invalida' });
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'canjes temporalmente deshabilitados (Ledger no configurado)' });
+
+  try {
+    const customer = await rewardsFindCustomer(email);
+    if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
+
+    // Recalcular saldo EN VIVO antes de canjear (no confiar en el cliente).
+    const earned = await rewardsComputeEarned(customer.id);
+    const ledger = await rewardsLedgerSummary(customer.id);
+    if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
+    const available = Math.max(0, earned.points_earned - ledger.redeemed_points);
+    if (available < reward.points) {
+      return res.status(409).json({ ok: false, error: 'puntos insuficientes', points_available: available });
+    }
+
+    const folio = 'RWD-' + Date.now().toString(36).toUpperCase() + '-' +
+      Math.random().toString(36).slice(2, 6).toUpperCase();
+    const wrote = await rewardsLedgerWrite({
+      tipo: 'canje',
+      folio: folio,
+      fecha: new Date().toISOString(),
+      customer_id: customer.id,
+      email: email,
+      nombre: rewardsCleanName((customer.attributes || {}).name),
+      reward_id: reward.id,
+      reward_name: reward.name,
+      puntos: reward.points,
+      descuento_pct: reward.value,
+      estado: 'pendiente'
+    });
+    if (!wrote) return res.status(502).json({ ok: false, error: 'no se pudo registrar el canje, intenta de nuevo' });
+
+    console.log('[rewards] canje ' + folio + ' ' + email + ' -' + reward.points + ' pts (' + reward.value + '%)');
+    return res.json({
+      ok: true,
+      folio: folio,
+      reward: reward,
+      points_available: available - reward.points,
+      instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu pr√≥xima renta para aplicar tu ' + reward.value + '% de descuento.'
+    });
+  } catch (e) {
+    console.error('[rewards] redeem error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error procesando el canje, intenta de nuevo' });
+  }
+});
+
+// ‚îÄ‚îÄ POST /rewards/scan  {code, pin?, order_number?, staff_name?} ‚îÄ‚îÄ
+// Resuelve el QR de miembro contra un indice qr->customer construido paginando
+// /customers (cache 12h; se reconstruye si el codigo no aparece).
+let rewardsQrIndex = null;       // Map code -> {id, name, email, number}
+let rewardsQrIndexAt = 0;
+let rewardsQrAmbiguous = {};     // codigos con colision (no resolubles)
+
+async function rewardsBuildQrIndex() {
+  const idx = new Map();
+  const ambiguous = {};
+  for (let page = 1; page <= 60; page++) {
+    const d = await booqableGet('/customers?page[size]=100&page[number]=' + page + '&sort=created_at');
+    const data = d.data || [];
+    for (const c of data) {
+      const a = c.attributes || {};
+      const code = rewardsQrCode(c.id);
+      if (idx.has(code)) {
+        ambiguous[code] = true;
+        console.error('[rewards] COLISION de QR ' + code + ': ' + idx.get(code).id + ' vs ' + c.id);
+        continue;
+      }
+      idx.set(code, { id: c.id, name: rewardsCleanName(a.name), email: a.email || '', number: a.number });
+    }
+    if (data.length < 100) break;
+  }
+  rewardsQrIndex = idx;
+  rewardsQrAmbiguous = ambiguous;
+  rewardsQrIndexAt = Date.now();
+  console.log('[rewards] indice QR: ' + idx.size + ' miembros, ' + Object.keys(ambiguous).length + ' colisiones');
+}
+
+app.post('/rewards/scan', async (req, res) => {
+  const body = req.body || {};
+  const code = String(body.code || '').trim().toUpperCase();
+  if (REWARDS_STAFF_PIN && String(body.pin || '') !== REWARDS_STAFF_PIN) {
+    return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
+  }
+  if (!/^FLM-[A-Z]{2}-\d{4}-[A-Z]\d[A-Z]\d$/.test(code)) {
+    return res.status(400).json({ ok: false, error: 'formato de codigo invalido (esperado FLM-XX-YYYY-XNXN)' });
+  }
+  try {
+    const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
+    if (stale) await rewardsBuildQrIndex();
+    let hit = rewardsQrIndex.get(code);
+    if (!hit && !stale) { await rewardsBuildQrIndex(); hit = rewardsQrIndex.get(code); }
+    if (rewardsQrAmbiguous[code]) {
+      return res.status(409).json({ ok: false, error: 'codigo ambiguo, identifica al miembro por email' });
+    }
+    if (!hit) return res.status(404).json({ ok: false, error: 'codigo no encontrado' });
+
+    // resumen completo del miembro (puntos en vivo)
+    const cd = await booqableGet('/customers/' + hit.id);
+    const customer = cd.data;
+    const out = await rewardsBuildMember(customer);
+
+    const logged = await rewardsLedgerWrite({
+      tipo: 'scan',
+      fecha: new Date().toISOString(),
+      code: code,
+      customer_id: hit.id,
+      nombre: out.member.name,
+      email: out.member.email,
+      order_number: body.order_number || '',
+      staff_name: body.staff_name || ''
+    });
+
+    console.log('[rewards] scan ' + code + ' -> ' + out.member.name + ' (logged=' + logged + ')');
+    return res.json(Object.assign({ ok: true, logged: logged }, out));
+  } catch (e) {
+    console.error('[rewards] scan error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error resolviendo el codigo, intenta de nuevo' });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log('Filmorent Tag Analyzer v7.2.1 running on port ' + PORT);
   console.log('Whisper transcription: ' + (openai ? 'ENABLED' : 'DISABLED (set OPENAI_API_KEY to enable)'));
   console.log('Auto-summary on conversation opened: ENABLED');
+  console.log('Rewards endpoints (/rewards/*): ' + (BOOQABLE_API_KEY ? 'ENABLED' : 'DISABLED (set BOOQABLE_API_KEY)') + (REWARDS_SHEETS_URL ? ', ledger ON' : ', ledger OFF'));
 });
