@@ -1218,8 +1218,30 @@ async function rewardsFindCustomer(email) {
   return c || null;
 }
 
-// Calcula puntos ganados + historial de un customer, excluyendo lineas ELSEPC.
-// Verificado contra Booqable real: sum(grand_total sin draft) === revenue_in_cents.
+// Lineas que NO generan puntos (regla de Daniel 22-jul-2026): subrenta ELSEPC
+// (90% no es ingreso nuestro) + cargos de servicio que no son renta de equipo
+// (pintura del estudio, personal: staff/encargados/operadores/gaffer). El equipo
+// del bono del estudio NO aparece como linea cobrada (va dentro del precio del
+// paquete), asi que no requiere exclusion. Nombres verificados contra el catalogo.
+const REWARDS_EXCLUDE_SUBSTR = [
+  'elsepc',                    // ELSEPC PureBB trifasico (subrenta)
+  'pintura y regreso',         // Pintura y regreso a estado original
+  'hora extra personal',
+  'operador prompter',
+  'encargado de estudio',      // todas las variantes (Alfredo/Barush/... y "ya no usar")
+  'gaffer'                     // por si se captura personal como linea libre
+];
+function rewardsLineExcluded(title) {
+  const t = (title || '').toLowerCase().trim();
+  if (!t) return false;
+  if (REWARDS_EXCLUDE_SUBSTR.some(k => t.indexOf(k) !== -1)) return true;
+  // producto "Staff" (personal) — match estricto para no rozar nombres de equipo
+  if (t === 'staff' || t.indexOf('staff ') === 0 || t.indexOf('staff -') === 0) return true;
+  return false;
+}
+
+// Calcula puntos ganados + historial de un customer, excluyendo las lineas de
+// REWARDS_EXCLUDE_SUBSTR. Verificado: sum(grand_total sin draft) === revenue_in_cents.
 async function rewardsComputeEarned(customerId) {
   // 1) todas las ordenes del cliente
   const orders = [];
@@ -1247,7 +1269,7 @@ async function rewardsComputeEarned(customerId) {
       for (const l of data) {
         const la = l.attributes || {};
         if (la.archived) continue;
-        if (((la.title || '').toLowerCase()).indexOf('elsepc') === -1) continue;
+        if (!rewardsLineExcluded(la.title)) continue;
         elsepcByOrder[la.order_id] = (elsepcByOrder[la.order_id] || 0) + (la.price_in_cents || 0);
       }
       if (data.length < 100) break;
