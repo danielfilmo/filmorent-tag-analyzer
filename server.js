@@ -1097,6 +1097,8 @@ app.get('/backfill/scan', async (req, res) => {
 //                                      ELSEPC) menos canjes del Ledger
 //   POST /rewards/redeem            -> valida saldo y registra canje en Ledger
 //   POST /rewards/scan              -> resuelve QR de miembro y registra scan
+//   GET  /rewards/folio?f=RWD-...   -> staff: estado de un folio de canje (Ledger)
+//   POST /rewards/folio/aplicar     -> staff: marca un folio como aplicado a orden
 //
 // Persistencia: Google Sheet "Rewards Ledger" via Apps Script (doPost para
 // escribir canjes/scans, doGet para leer canjes por customer) — mismo patron
@@ -1143,6 +1145,14 @@ const REWARDS_ORIGINS = [
 // Rate limit simple por IP (el endpoint es publico y devuelve datos de miembro):
 // 30 requests por ventana de 5 min. En memoria — suficiente para un solo dyno.
 const rewardsRate = new Map();
+// IP real del cliente (x-forwarded-for primero — Render corre detras de proxy)
+// y user-agent recortado. Los usan el rate limiter y el audit trail del Ledger.
+function rewardsClientIp(req) {
+  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || 'desconocida';
+}
+function rewardsClientUa(req) {
+  return String(req.headers['user-agent'] || '').slice(0, 150);
+}
 function rewardsRateOk(ip) {
   const now = Date.now();
   let b = rewardsRate.get(ip);
@@ -1162,8 +1172,7 @@ app.use('/rewards', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (!BOOQABLE_API_KEY) return res.status(503).json({ ok: false, error: 'rewards deshabilitado: falta BOOQABLE_API_KEY en el env' });
-  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || 'desconocida';
-  if (!rewardsRateOk(ip)) return res.status(429).json({ ok: false, error: 'demasiadas solicitudes, espera unos minutos' });
+  if (!rewardsRateOk(rewardsClientIp(req))) return res.status(429).json({ ok: false, error: 'demasiadas solicitudes, espera unos minutos' });
   next();
 });
 
@@ -1441,7 +1450,9 @@ app.post('/rewards/redeem', async (req, res) => {
       reward_name: reward.name,
       puntos: reward.points,
       descuento_pct: reward.value,
-      estado: 'pendiente'
+      estado: 'pendiente',
+      ip: rewardsClientIp(req),
+      ua: rewardsClientUa(req)
     });
     if (!wrote) return res.status(502).json({ ok: false, error: 'no se pudo registrar el canje, intenta de nuevo' });
 
@@ -1451,6 +1462,9 @@ app.post('/rewards/redeem', async (req, res) => {
       folio: folio,
       reward: reward,
       points_available: available - reward.points,
+      // el Ledger esta configurado (503 arriba si no) y el .gs manda el correo
+      // de confirmacion al registrar la fila del canje
+      email_confirmacion: true,
       instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu próxima renta para aplicar tu ' + reward.value + '% de descuento.'
     });
   } catch (e) {
@@ -1530,7 +1544,9 @@ app.post('/rewards/scan', async (req, res) => {
       nombre: out.member.name,
       email: out.member.email,
       order_number: body.order_number || '',
-      staff_name: body.staff_name || ''
+      staff_name: body.staff_name || '',
+      ip: rewardsClientIp(req),
+      ua: rewardsClientUa(req)
     });
 
     console.log('[rewards] scan ' + code + ' -> ' + out.member.name + ' (logged=' + logged + ')');
@@ -1538,6 +1554,86 @@ app.post('/rewards/scan', async (req, res) => {
   } catch (e) {
     console.error('[rewards] scan error: ' + e.message);
     return res.status(502).json({ ok: false, error: 'error resolviendo el codigo, intenta de nuevo' });
+  }
+});
+
+// ── GET /rewards/folio?f=RWD-...&pin= ───────────────────────
+// Para staff (F1.5): consulta el estado de un folio de canje en el Ledger
+// (Apps Script doGet action=folio). No toca Booqable. El .gs responde
+// {ok, found, folio:{folio,fecha,customer_id,email,nombre,reward,points,
+//  discount_pct,estado,orden_aplicada}}.
+app.get('/rewards/folio', async (req, res) => {
+  if (REWARDS_STAFF_PIN && String(req.query.pin || '') !== REWARDS_STAFF_PIN) {
+    return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
+  }
+  const folio = String(req.query.f || '').trim().toUpperCase();
+  if (folio.indexOf('RWD-') !== 0 || folio.length < 6) {
+    return res.status(400).json({ ok: false, error: 'folio invalido (esperado RWD-...)' });
+  }
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'consulta de folios deshabilitada (Ledger no configurado)' });
+  try {
+    const r = await fetch(REWARDS_SHEETS_URL + '?action=folio&folio=' + encodeURIComponent(folio), { redirect: 'follow' });
+    if (!r.ok) return res.status(502).json({ ok: false, error: 'no se pudo leer el Ledger, intenta de nuevo' });
+    const j = await r.json().catch(() => null);
+    if (!j || j.ok === false) return res.status(502).json({ ok: false, error: 'no se pudo leer el Ledger, intenta de nuevo' });
+    if (!j.found) return res.status(404).json({ ok: false, found: false, error: 'folio no encontrado' });
+    console.log('[rewards] folio ' + folio + ' -> ' + ((j.folio || {}).estado || '?'));
+    return res.json({ ok: true, found: true, folio: j.folio });
+  } catch (e) {
+    console.error('[rewards] folio error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error consultando el folio, intenta de nuevo' });
+  }
+});
+
+// ── POST /rewards/folio/aplicar  {folio, order_number, staff_name?, pin?} ──
+// Para staff (F1.5): marca un folio de canje como aplicado a una orden.
+// POST al Apps Script {tipo:'aplicar', folio, order_number, staff_name};
+// el .gs responde {ok, updated:bool, estado_previo}.
+app.post('/rewards/folio/aplicar', async (req, res) => {
+  const body = req.body || {};
+  if (REWARDS_STAFF_PIN && String(body.pin || '') !== REWARDS_STAFF_PIN) {
+    return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
+  }
+  const folio = String(body.folio || '').trim().toUpperCase();
+  const orderNumber = String(body.order_number || '').trim();
+  if (folio.indexOf('RWD-') !== 0 || folio.length < 6) {
+    return res.status(400).json({ ok: false, error: 'folio invalido (esperado RWD-...)' });
+  }
+  if (!orderNumber) return res.status(400).json({ ok: false, error: 'order_number requerido' });
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'aplicacion de folios deshabilitada (Ledger no configurado)' });
+  try {
+    const r = await fetch(REWARDS_SHEETS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tipo: 'aplicar',
+        folio: folio,
+        order_number: orderNumber,
+        staff_name: String(body.staff_name || '').trim()
+      }),
+      redirect: 'follow'
+    });
+    if (!r.ok) return res.status(502).json({ ok: false, error: 'no se pudo escribir al Ledger, intenta de nuevo' });
+    const j = await r.json().catch(() => null);
+    if (!j) return res.status(502).json({ ok: false, error: 'respuesta invalida del Ledger, intenta de nuevo' });
+    if (j.ok === false) {
+      return res.status(404).json({ ok: false, error: j.error || 'folio no encontrado' });
+    }
+    if (!j.updated) {
+      const prev = j.estado_previo || 'desconocido';
+      return res.status(409).json({
+        ok: false,
+        updated: false,
+        estado_previo: prev,
+        error: prev === 'aplicado' ? 'el folio ya estaba aplicado' : ('el folio no se pudo aplicar (estado: ' + prev + ')')
+      });
+    }
+    console.log('[rewards] folio ' + folio + ' aplicado a orden ' + orderNumber +
+      (body.staff_name ? ' por ' + String(body.staff_name).trim() : ''));
+    return res.json({ ok: true, updated: true, estado_previo: j.estado_previo || 'pendiente' });
+  } catch (e) {
+    console.error('[rewards] folio/aplicar error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error aplicando el folio, intenta de nuevo' });
   }
 });
 
