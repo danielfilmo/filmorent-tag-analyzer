@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.4', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY }));
 
 function extractContactId(body) {
   return (
@@ -1179,11 +1179,30 @@ function rewardsCatalogFor(avgTicketCents) {
   return catalog;
 }
 
+// Nivel por RENTAS DE LOS ÚLTIMOS 12 MESES (decisión de Daniel 24-jul-2026):
+// el estatus se gana y se defiende cada año; los puntos canjeables NO caducan.
+// min en centavos SIN IVA de revenue rodante de 12 meses (base ya sin
+// exclusiones). Censo 24-jul: Plata $20k+/año = 57 clientes (top 5% de 1,114
+// activos), Oro $100k+/año = 5 clientes.
 const REWARDS_TIERS = [
-  { name: 'Bronce', min: 0, max: 499, discount: 0 },
-  { name: 'Plata', min: 500, max: 1499, discount: 5 },
-  { name: 'Oro', min: 1500, max: null, discount: 10 }
+  { name: 'Bronce', min_12m_cents: 0, discount: 0 },
+  { name: 'Plata', min_12m_cents: 2000000, discount: 5 },   // $20,000 MXN/año
+  { name: 'Oro', min_12m_cents: 10000000, discount: 10 }    // $100,000 MXN/año
 ];
+
+// Cuentas que NO participan en el programa (decisión de Daniel 24-jul-2026):
+// socios/internos. No aparecen en /member, /redeem, /pagar ni en el índice QR.
+const REWARDS_EXCLUDED_CUSTOMER_IDS = new Set([
+  '4263eb3e-1448-47a6-974d-73494fe8783b'  // Pasumecha Producciones (socio)
+]);
+// Órdenes que no acumulan puntos: ventas de equipo capturadas como orden.
+// El programa premia renta recurrente; una compra de equipo es transacción
+// única (reversible: quitar el número de esta lista si Daniel decide que
+// las ventas sí acumulen). Ventas futuras: capturar la línea empezando con
+// "VENTA" y queda excluida sola (regla en rewardsLineExcluded).
+const REWARDS_EXCLUDED_ORDER_NUMBERS = new Set([
+  10261  // Blackbear 8-jul-2026: venta Ronin 2 + Ready Rig GS ProArm ($130k)
+]);
 
 // CORS solo para /rewards/* (el portal vive en otro dominio).
 const REWARDS_ORIGINS = [
@@ -1245,6 +1264,33 @@ async function booqableGet(pathWithQuery, attempt) {
   return r.json();
 }
 
+// Escritura a Booqable (POST/PATCH/DELETE) con el mismo retry en 429.
+// Verificado 24-jul-2026 en orden de prueba: POST /lines con owner_id/owner_type
+// crea la línea y los totales de la orden se recalculan solos.
+async function booqableWrite(method, path, payload, attempt) {
+  const r = await fetch(BOOQABLE_BASE + path, {
+    method: method,
+    headers: {
+      'Authorization': 'Bearer ' + BOOQABLE_API_KEY,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: payload === undefined ? undefined : JSON.stringify(payload)
+  });
+  if (r.status === 429 && (attempt || 0) < 2) {
+    const ra = parseInt(r.headers.get('retry-after') || '2', 10);
+    await new Promise(z => setTimeout(z, (ra || 2) * 1000));
+    return booqableWrite(method, path, payload, (attempt || 0) + 1);
+  }
+  if (!r.ok) {
+    const body = await r.text().catch(() => '');
+    const err = new Error('Booqable ' + r.status + ': ' + body.slice(0, 200));
+    err.status = r.status;
+    throw err;
+  }
+  return r.status === 204 ? null : r.json();
+}
+
 // QR de miembro: FLM-XX-YYYY-XXNX, deterministico del customer_id (FNV-1a 32-bit).
 function rewardsQrCode(customerId) {
   let h = 0x811c9dc5;
@@ -1263,9 +1309,9 @@ function rewardsQrCode(customerId) {
   return 'FLM-' + a + b + '-' + year + '-' + c + n + d + e;
 }
 
-function rewardsTierFor(points) {
+function rewardsTierFor(revenue12mCents) {
   for (let i = REWARDS_TIERS.length - 1; i >= 0; i--) {
-    if (points >= REWARDS_TIERS[i].min) return REWARDS_TIERS[i];
+    if (revenue12mCents >= REWARDS_TIERS[i].min_12m_cents) return REWARDS_TIERS[i];
   }
   return REWARDS_TIERS[0];
 }
@@ -1296,6 +1342,9 @@ function rewardsLineExcluded(title) {
   if (REWARDS_EXCLUDE_SUBSTR.some(k => t.indexOf(k) !== -1)) return true;
   // producto "Staff" (personal) — match estricto para no rozar nombres de equipo
   if (t === 'staff' || t.indexOf('staff ') === 0 || t.indexOf('staff -') === 0) return true;
+  // ventas de equipo capturadas como línea libre ("VENTA - Ronin 2...") —
+  // prefijo estricto para no rozar títulos que contengan "ventana" etc.
+  if (t.indexOf('venta ') === 0 || t.indexOf('venta-') === 0 || t.indexOf('venta:') === 0) return true;
   return false;
 }
 
@@ -1312,8 +1361,10 @@ async function rewardsComputeEarned(customerId) {
     if (data.length < 100) break;
   }
   const countable = orders.filter(o => {
-    const st = (o.attributes || {}).status;
-    return st !== 'draft' && st !== 'concept' && st !== 'canceled';
+    const a = o.attributes || {};
+    if (a.status === 'draft' || a.status === 'concept' || a.status === 'canceled') return false;
+    if (REWARDS_EXCLUDED_ORDER_NUMBERS.has(a.number)) return false; // ventas de equipo
+    return true;
   });
 
   // 2) lineas ELSEPC de esas ordenes, en lotes de 25 order_ids
@@ -1338,6 +1389,10 @@ async function rewardsComputeEarned(customerId) {
   // 3) base de puntos por orden = grand_total - ELSEPC (convertido a base sin IVA)
   let totalBaseCents = 0;
   let totalElsepcCents = 0;
+  // revenue rodante de 12 meses (base del NIVEL): fecha de la renta
+  // (starts_at) o de creación si no la hay
+  const cutoff12m = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString();
+  let revenue12mCents = 0;
   const orderRows = countable.map(o => {
     const a = o.attributes || {};
     const g = a.grand_total_in_cents || 0;
@@ -1347,6 +1402,9 @@ async function rewardsComputeEarned(customerId) {
     const elBase = Math.min(Math.round(elWithTax * ratio), g);
     totalBaseCents += g;
     totalElsepcCents += elBase;
+    if (String(a.starts_at || a.created_at || '') >= cutoff12m) {
+      revenue12mCents += Math.max(0, g - elBase);
+    }
     return {
       id: o.id,
       number: a.number,
@@ -1366,6 +1424,7 @@ async function rewardsComputeEarned(customerId) {
   return {
     orders: orderRows,
     revenue_cents: totalBaseCents,
+    revenue_12m_cents: revenue12mCents,
     elsepc_excluded_cents: totalElsepcCents,
     points_earned: Math.floor(pointsBaseCents / 100 / 100)
   };
@@ -1417,7 +1476,7 @@ async function rewardsBuildMember(customer) {
   const ledger = await rewardsLedgerSummary(customer.id);
   const redeemed = ledger ? ledger.redeemed_points : 0;
   const available = Math.max(0, earned.points_earned - redeemed);
-  const tier = rewardsTierFor(available);
+  const tier = rewardsTierFor(earned.revenue_12m_cents);
   // Ticket promedio para el crédito calibrado: revenue SIN exclusiones ELSEPC
   // (el mismo que ya calcula rewardsComputeEarned) / # de órdenes contables.
   const countableOrders = earned.orders.length;
@@ -1441,9 +1500,14 @@ async function rewardsBuildMember(customer) {
       redeemed: redeemed,
       available: available,
       revenue_cents: earned.revenue_cents,
+      revenue_12m_cents: earned.revenue_12m_cents,
       elsepc_excluded_cents: earned.elsepc_excluded_cents
     },
-    tier: { name: tier.name, discount: tier.discount },
+    tier: {
+      name: tier.name,
+      discount: tier.discount,
+      base_12m_cents: earned.revenue_12m_cents
+    },
     orders: earned.orders,
     redemptions: ledger ? ledger.redemptions : [],
     catalog: rewardsCatalogFor(avgTicketCents),
@@ -1460,6 +1524,9 @@ app.get('/rewards/member', async (req, res) => {
   try {
     const customer = await rewardsFindCustomer(email);
     if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customer.id)) {
+      return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
+    }
     const out = await rewardsBuildMember(customer);
     console.log('[rewards] member ' + email + ' -> ' + out.points.available + ' pts disponibles (' +
       out.points.earned + ' ganados, ' + out.points.redeemed + ' canjeados, ledger=' + out.ledger_ok + ')');
@@ -1481,6 +1548,9 @@ app.post('/rewards/redeem', async (req, res) => {
   try {
     const customer = await rewardsFindCustomer(email);
     if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customer.id)) {
+      return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
+    }
 
     // Recalcular saldo Y catálogo personalizado EN VIVO (no confiar en el
     // cliente): el reward_id se valida contra el catálogo calibrado del propio
@@ -1556,6 +1626,7 @@ async function rewardsBuildQrIndex() {
     for (const c of data) {
       if (seen.has(c.id)) continue;
       seen.add(c.id);
+      if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(c.id)) continue; // socios/internos fuera
       const a = c.attributes || {};
       const code = rewardsQrCode(c.id);
       if (idx.has(code)) {
@@ -1618,6 +1689,172 @@ app.post('/rewards/scan', async (req, res) => {
   } catch (e) {
     console.error('[rewards] scan error: ' + e.message);
     return res.status(502).json({ ok: false, error: 'error resolviendo el codigo, intenta de nuevo' });
+  }
+});
+
+// ── POST /rewards/pagar  {code|email, reward_id, order_number, staff_name?, pin?} ──
+// "Pagar con puntos" en una escaneada (aprobado por Daniel 24-jul-2026): el staff
+// escanea el QR del miembro (o captura su email), elige el crédito de su catálogo
+// calibrado y captura el # de orden; el server APLICA el descuento en Booqable
+// (línea negativa CON IVA — el cliente ve el crédito exacto en pesos) y registra
+// el canje ya 'aplicado' en el Ledger. El folio queda solo como registro interno.
+// Candados: PIN de staff, saldo y catálogo recalculados en vivo, orden ≥ 2× el
+// crédito, 1 crédito Rewards por orden, orden cancelada rechazada.
+app.post('/rewards/pagar', async (req, res) => {
+  const body = req.body || {};
+  if (REWARDS_STAFF_PIN && String(body.pin || '') !== REWARDS_STAFF_PIN) {
+    return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
+  }
+  const code = String(body.code || '').trim().toUpperCase();
+  const email = String(body.email || '').trim().toLowerCase();
+  const rewardId = parseInt(body.reward_id, 10);
+  const orderNumber = parseInt(body.order_number, 10);
+  if (!Number.isFinite(rewardId)) return res.status(400).json({ ok: false, error: 'recompensa invalida' });
+  if (!Number.isFinite(orderNumber)) return res.status(400).json({ ok: false, error: 'order_number invalido' });
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'pagos con puntos deshabilitados (Ledger no configurado)' });
+  try {
+    // 1) resolver al miembro por QR o por email
+    let customerId = null;
+    if (code) {
+      const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
+      if (stale) await rewardsBuildQrIndex();
+      let hit = rewardsQrIndex.get(code);
+      if (!hit && !stale) { await rewardsBuildQrIndex(); hit = rewardsQrIndex.get(code); }
+      if (rewardsQrAmbiguous[code]) return res.status(409).json({ ok: false, error: 'codigo ambiguo, identifica al miembro por email' });
+      if (!hit) return res.status(404).json({ ok: false, error: 'codigo no encontrado' });
+      customerId = hit.id;
+    } else if (email && email.indexOf('@') !== -1) {
+      const c = await rewardsFindCustomer(email);
+      if (!c) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
+      customerId = c.id;
+    } else {
+      return res.status(400).json({ ok: false, error: 'manda code (QR) o email del miembro' });
+    }
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customerId)) {
+      return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
+    }
+    const cd = await booqableGet('/customers/' + customerId);
+    const customer = cd.data;
+
+    // 2) saldo + catálogo calibrado EN VIVO (no confiar en el cliente)
+    const earned = await rewardsComputeEarned(customerId);
+    const ledger = await rewardsLedgerSummary(customerId);
+    if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
+    const countableOrders = earned.orders.length;
+    const avgTicketCents = countableOrders ? Math.round(earned.revenue_cents / countableOrders) : 0;
+    const reward = rewardsCatalogFor(avgTicketCents).find(r => r.id === rewardId);
+    if (!reward) return res.status(400).json({ ok: false, error: 'recompensa invalida' });
+    const available = Math.max(0, earned.points_earned - ledger.redeemed_points);
+    if (available < reward.points) {
+      return res.status(409).json({ ok: false, error: 'puntos insuficientes', points_available: available });
+    }
+
+    // 3) la orden destino: existe, no cancelada, regla 2x, sin crédito previo
+    if (REWARDS_EXCLUDED_ORDER_NUMBERS.has(orderNumber)) {
+      return res.status(409).json({ ok: false, error: 'los creditos Rewards aplican solo en rentas, no en ventas de equipo' });
+    }
+    const od = await booqableGet('/orders?filter[number]=' + orderNumber + '&page[size]=2');
+    const order = (od.data || [])[0];
+    if (!order) return res.status(404).json({ ok: false, error: 'no existe la orden #' + orderNumber });
+    const oa = order.attributes || {};
+    if (oa.status === 'canceled') {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' esta cancelada' });
+    }
+    const totalWithTax = oa.grand_total_with_tax_in_cents || 0;
+    if (totalWithTax < reward.credito_cents * 2) {
+      return res.status(409).json({
+        ok: false,
+        error: 'la orden debe ser de al menos ' + rewardsFormatMXN(reward.credito_cents * 2) +
+          ' (2x el credito de ' + rewardsFormatMXN(reward.credito_cents) + '); total actual con IVA: ' + rewardsFormatMXN(totalWithTax)
+      });
+    }
+    const ld = await booqableGet('/lines?filter[order_id]=' + order.id + '&page[size]=100');
+    const lineasOrden = (ld.data || []).filter(l => !((l.attributes || {}).archived));
+    const yaTiene = lineasOrden.some(l =>
+      String((l.attributes || {}).title || '').toLowerCase().indexOf('filmorent rewards') === 0);
+    if (yaTiene) {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene un credito Rewards aplicado' });
+    }
+    // regla de Daniel 24-jul-2026: los puntos NO aplican a ventas de equipo —
+    // si la orden trae una línea de venta (prefijo "VENTA"), se rechaza
+    const esVenta = lineasOrden.some(l => {
+      const t = String((l.attributes || {}).title || '').toLowerCase().trim();
+      return t.indexOf('venta ') === 0 || t.indexOf('venta-') === 0 || t.indexOf('venta:') === 0;
+    });
+    if (esVenta) {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' incluye venta de equipo: los creditos Rewards aplican solo en rentas' });
+    }
+
+    // 4) aplicar el descuento en Booqable
+    const folio = 'RWD-' + Date.now().toString(36).toUpperCase() + '-' +
+      Math.random().toString(36).slice(2, 6).toUpperCase();
+    const credito = rewardsFormatMXN(reward.credito_cents);
+    await booqableWrite('POST', '/lines', {
+      data: {
+        type: 'lines',
+        attributes: {
+          owner_id: order.id,
+          owner_type: 'orders',
+          title: 'Filmorent Rewards - credito ' + credito + ' (' + folio + ')',
+          quantity: 1,
+          price_each_in_cents: -reward.credito_cents
+        }
+      }
+    });
+
+    // 5) registrar en el Ledger: fila de canje (manda el email al cliente) y
+    //    de inmediato marcarla 'aplicado' con la orden y el staff. Si el Ledger
+    //    falla DESPUÉS de aplicar la línea, avisar para registro manual.
+    const staffName = String(body.staff_name || '').trim();
+    const wrote = await rewardsLedgerWrite({
+      tipo: 'canje',
+      folio: folio,
+      fecha: new Date().toISOString(),
+      customer_id: customerId,
+      email: (customer.attributes || {}).email || '',
+      nombre: rewardsCleanName((customer.attributes || {}).name),
+      reward_id: reward.id,
+      reward_name: reward.name,
+      puntos: reward.points,
+      descuento_pct: 0,
+      credito_mxn: reward.credito_cents / 100,
+      estado: 'pendiente',
+      ip: rewardsClientIp(req),
+      ua: rewardsClientUa(req)
+    });
+    let aplicadoEnLedger = false;
+    if (wrote) {
+      aplicadoEnLedger = await rewardsLedgerWrite({
+        tipo: 'aplicar',
+        folio: folio,
+        order_number: String(orderNumber),
+        staff_name: staffName || 'auto (pagar con puntos)'
+      });
+    }
+
+    // total nuevo de la orden (recalculado por Booqable)
+    let nuevoTotal = null;
+    try {
+      const od2 = await booqableGet('/orders/' + order.id);
+      nuevoTotal = ((od2.data || {}).attributes || {}).grand_total_with_tax_in_cents;
+    } catch (e2) { /* solo informativo */ }
+
+    console.log('[rewards] pagar ' + folio + ' ' + (customer.attributes || {}).email + ' -' + reward.points +
+      ' pts -> orden #' + orderNumber + ' (' + credito + ', ledger=' + (wrote ? (aplicadoEnLedger ? 'aplicado' : 'pendiente') : 'FALLO') + ')');
+    return res.json({
+      ok: true,
+      folio: folio,
+      credito_mxn: reward.credito_cents / 100,
+      puntos_usados: reward.points,
+      points_restantes: available - reward.points,
+      order_number: orderNumber,
+      nuevo_total_mxn: nuevoTotal === null ? null : nuevoTotal / 100,
+      ledger_ok: !!wrote,
+      advertencia: wrote ? null : 'el descuento SE APLICO en Booqable pero el Ledger no respondio: anota el folio ' + folio + ' manualmente en el Sheet'
+    });
+  } catch (e) {
+    console.error('[rewards] pagar error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error aplicando el credito, intenta de nuevo' });
   }
 });
 
