@@ -1111,6 +1111,8 @@ app.get('/backfill/scan', async (req, res) => {
 //   - La linea del producto ELSEPC no genera puntos (subrenta: 90% no es
 //     ingreso nuestro). El precio de linea viene CON IVA, asi que se convierte
 //     a base sin IVA con el ratio grand_total/grand_total_with_tax de su orden.
+//   - Canje = "crédito calibrado" (decisión F0, 23-jul-2026): crédito en pesos
+//     por nivel de puntos, con doble tope y dedupe. Ver rewardsCatalogFor().
 //   - QR determinstico del customer_id, formato FLM-XX-YYYY-XXNX. Hash FNV-1a
 //     32-bit (el hash del prototipo — suma de charCodes — solo producia ~30k
 //     valores => colisiones casi seguras entre ~2k miembros).
@@ -1121,7 +1123,9 @@ const BOOQABLE_BASE = process.env.BOOQABLE_BASE || 'https://filmorent-sa-de-cv.b
 const REWARDS_SHEETS_URL = process.env.REWARDS_SHEETS_URL; // Apps Script del Rewards Ledger
 const REWARDS_STAFF_PIN = process.env.REWARDS_STAFF_PIN;   // opcional: PIN para /rewards/scan
 
-// Catalogo v1 (solo descuentos). El portal lo consume de aqui — una sola fuente.
+// LEGACY — Catalogo v1 (solo % de descuento). Ya NO lo usa nadie: desde la
+// decision F0 (crédito calibrado, 23-jul-2026) el catálogo se personaliza por
+// miembro con rewardsCatalogFor(). Se conserva solo como documentación/fallback.
 const REWARDS_CATALOG = [
   { id: 1, name: '5% descuento en tu próxima renta', points: 100, value: 5 },
   { id: 2, name: '10% descuento en tu próxima renta', points: 250, value: 10 },
@@ -1129,6 +1133,51 @@ const REWARDS_CATALOG = [
   { id: 4, name: '20% descuento en tu próxima renta', points: 800, value: 20 },
   { id: 5, name: '25% descuento en tu próxima renta', points: 1200, value: 25 }
 ];
+
+// ── Crédito calibrado (decisión F0 de Daniel, 23-jul-2026) ──
+// El premio deja de ser % y pasa a ser CRÉDITO EN PESOS con doble tope:
+//   crédito del nivel = MIN(techo del nivel, 50% del ticket promedio del
+//   miembro redondeado a múltiplos de $50), con piso de $100.
+// Ids estables por nivel (el Ledger los referencia): 50→6 (escalón de entrada,
+// nuevo), 100→1, 250→2, 500→3, 800→4, 1200→5. Reglas de mostrador que NO
+// cambian (solo copy): 1 canje por orden, el folio no da cambio, la orden debe
+// ser ≥ 2× el crédito.
+const REWARDS_CREDIT_LEVELS = [
+  { id: 6, points: 50,   cap_cents: 10000 },   // $100
+  { id: 1, points: 100,  cap_cents: 25000 },   // $250
+  { id: 2, points: 250,  cap_cents: 70000 },   // $700
+  { id: 3, points: 500,  cap_cents: 160000 },  // $1,600
+  { id: 4, points: 800,  cap_cents: 280000 },  // $2,800
+  { id: 5, points: 1200, cap_cents: 450000 }   // $4,500
+];
+
+// "$1,600" estilo es-MX sin centavos (manual: no depende de ICU en el runtime).
+function rewardsFormatMXN(cents) {
+  const pesos = Math.round((cents || 0) / 100);
+  return '$' + String(pesos).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// Catálogo personalizado del miembro. DEDUPE: si el tope del ticket hace que
+// dos niveles den el mismo crédito, solo se ofrece el de MENOS puntos — cada
+// nivel listado debe dar un crédito estrictamente mayor que el anterior.
+function rewardsCatalogFor(avgTicketCents) {
+  // 50% del ticket promedio, redondeado a múltiplos de $50 (5000 centavos)
+  const halfTicket = Math.round((avgTicketCents || 0) / 2 / 5000) * 5000;
+  const catalog = [];
+  let prevCredit = 0;
+  for (const lvl of REWARDS_CREDIT_LEVELS) {
+    const credit = Math.max(10000, Math.min(lvl.cap_cents, halfTicket)); // piso $100
+    if (credit <= prevCredit) continue;
+    prevCredit = credit;
+    catalog.push({
+      id: lvl.id,
+      name: 'Crédito de ' + rewardsFormatMXN(credit) + ' en tu próxima renta',
+      points: lvl.points,
+      credito_cents: credit
+    });
+  }
+  return catalog;
+}
 
 const REWARDS_TIERS = [
   { name: 'Bronce', min: 0, max: 499, discount: 0 },
@@ -1139,6 +1188,7 @@ const REWARDS_TIERS = [
 // CORS solo para /rewards/* (el portal vive en otro dominio).
 const REWARDS_ORIGINS = [
   'https://rewards.filmorent.com',
+  'https://rewards-filmorent.daniel-85f.workers.dev',
   'https://filmorent.com',
   'https://www.filmorent.com'
 ];
@@ -1368,6 +1418,10 @@ async function rewardsBuildMember(customer) {
   const redeemed = ledger ? ledger.redeemed_points : 0;
   const available = Math.max(0, earned.points_earned - redeemed);
   const tier = rewardsTierFor(available);
+  // Ticket promedio para el crédito calibrado: revenue SIN exclusiones ELSEPC
+  // (el mismo que ya calcula rewardsComputeEarned) / # de órdenes contables.
+  const countableOrders = earned.orders.length;
+  const avgTicketCents = countableOrders ? Math.round(earned.revenue_cents / countableOrders) : 0;
   return {
     member: {
       customer_id: customer.id,
@@ -1379,7 +1433,8 @@ async function rewardsBuildMember(customer) {
       member_since: a.created_at,
       last_order_at: a.last_order_at || a.latest_order_at || null,
       order_count: a.order_count || 0,
-      avg_order_cents: a.average_order_value_in_cents || 0
+      avg_order_cents: a.average_order_value_in_cents || 0,
+      avg_ticket_cents: avgTicketCents
     },
     points: {
       earned: earned.points_earned,
@@ -1391,7 +1446,7 @@ async function rewardsBuildMember(customer) {
     tier: { name: tier.name, discount: tier.discount },
     orders: earned.orders,
     redemptions: ledger ? ledger.redemptions : [],
-    catalog: REWARDS_CATALOG,
+    catalog: rewardsCatalogFor(avgTicketCents),
     ledger_ok: !!ledger
   };
 }
@@ -1420,23 +1475,30 @@ app.post('/rewards/redeem', async (req, res) => {
   const email = String((req.body || {}).email || '').trim().toLowerCase();
   const rewardId = parseInt((req.body || {}).reward_id, 10);
   if (!email || email.indexOf('@') === -1) return res.status(400).json({ ok: false, error: 'email invalido' });
-  const reward = REWARDS_CATALOG.find(r => r.id === rewardId);
-  if (!reward) return res.status(400).json({ ok: false, error: 'recompensa invalida' });
+  if (!Number.isFinite(rewardId)) return res.status(400).json({ ok: false, error: 'recompensa invalida' });
   if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'canjes temporalmente deshabilitados (Ledger no configurado)' });
 
   try {
     const customer = await rewardsFindCustomer(email);
     if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
 
-    // Recalcular saldo EN VIVO antes de canjear (no confiar en el cliente).
+    // Recalcular saldo Y catálogo personalizado EN VIVO (no confiar en el
+    // cliente): el reward_id se valida contra el catálogo calibrado del propio
+    // miembro, no contra una tabla estática.
     const earned = await rewardsComputeEarned(customer.id);
     const ledger = await rewardsLedgerSummary(customer.id);
     if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
+    const countableOrders = earned.orders.length;
+    const avgTicketCents = countableOrders ? Math.round(earned.revenue_cents / countableOrders) : 0;
+    const catalog = rewardsCatalogFor(avgTicketCents);
+    const reward = catalog.find(r => r.id === rewardId);
+    if (!reward) return res.status(400).json({ ok: false, error: 'recompensa invalida' });
     const available = Math.max(0, earned.points_earned - ledger.redeemed_points);
     if (available < reward.points) {
       return res.status(409).json({ ok: false, error: 'puntos insuficientes', points_available: available });
     }
 
+    const credito = rewardsFormatMXN(reward.credito_cents);
     const folio = 'RWD-' + Date.now().toString(36).toUpperCase() + '-' +
       Math.random().toString(36).slice(2, 6).toUpperCase();
     const wrote = await rewardsLedgerWrite({
@@ -1447,16 +1509,17 @@ app.post('/rewards/redeem', async (req, res) => {
       email: email,
       nombre: rewardsCleanName((customer.attributes || {}).name),
       reward_id: reward.id,
-      reward_name: reward.name,
+      reward_name: reward.name,               // ej. "Crédito de $700 en tu próxima renta"
       puntos: reward.points,
-      descuento_pct: reward.value,
+      descuento_pct: 0,                       // ya no hay %: el premio es crédito
+      credito_mxn: reward.credito_cents / 100, // número en pesos (el .gs lo ignora sin romper)
       estado: 'pendiente',
       ip: rewardsClientIp(req),
       ua: rewardsClientUa(req)
     });
     if (!wrote) return res.status(502).json({ ok: false, error: 'no se pudo registrar el canje, intenta de nuevo' });
 
-    console.log('[rewards] canje ' + folio + ' ' + email + ' -' + reward.points + ' pts (' + reward.value + '%)');
+    console.log('[rewards] canje ' + folio + ' ' + email + ' -' + reward.points + ' pts (crédito ' + credito + ')');
     return res.json({
       ok: true,
       folio: folio,
@@ -1465,7 +1528,8 @@ app.post('/rewards/redeem', async (req, res) => {
       // el Ledger esta configurado (503 arriba si no) y el .gs manda el correo
       // de confirmacion al registrar la fila del canje
       email_confirmacion: true,
-      instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu próxima renta para aplicar tu ' + reward.value + '% de descuento.'
+      instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu próxima renta para aplicar tu crédito de ' +
+        credito + '. Aplica en rentas de al menos el doble del crédito; el folio no da cambio.'
     });
   } catch (e) {
     console.error('[rewards] redeem error: ' + e.message);
