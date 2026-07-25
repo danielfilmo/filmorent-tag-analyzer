@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.4', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.5', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY }));
 
 function extractContactId(body) {
   return (
@@ -1121,7 +1121,29 @@ app.get('/backfill/scan', async (req, res) => {
 const BOOQABLE_API_KEY = process.env.BOOQABLE_API_KEY;
 const BOOQABLE_BASE = process.env.BOOQABLE_BASE || 'https://filmorent-sa-de-cv.booqable.com/api/4';
 const REWARDS_SHEETS_URL = process.env.REWARDS_SHEETS_URL; // Apps Script del Rewards Ledger
-const REWARDS_STAFF_PIN = process.env.REWARDS_STAFF_PIN;   // opcional: PIN para /rewards/scan
+const REWARDS_STAFF_PIN = process.env.REWARDS_STAFF_PIN;   // PIN genérico (legacy/respaldo)
+// v8.5: PIN individual por empleado — env REWARDS_STAFF_PINS con pares
+// "1111:Suheidi,2222:Eduardo" (acepta pin:nombre o nombre:pin). Con esto el
+// Ledger registra QUIÉN hizo cada scan/canje/aplicación con su propio PIN.
+const REWARDS_STAFF_PINS = (() => {
+  const map = new Map();
+  String(process.env.REWARDS_STAFF_PINS || '').split(',').forEach(pair => {
+    const p = pair.split(':').map(s => s.trim()).filter(Boolean);
+    if (p.length !== 2) return;
+    if (/^\d{3,10}$/.test(p[0])) map.set(p[0], p[1]);
+    else if (/^\d{3,10}$/.test(p[1])) map.set(p[1], p[0]);
+  });
+  return map;
+})();
+// Valida un PIN de staff. Devuelve: nombre del empleado (PINs individuales),
+// 'staff' (PIN genérico), '' (sin PINs configurados: acceso libre) o null (inválido).
+function rewardsStaffFromPin(pin) {
+  const p = String(pin || '').trim();
+  if (REWARDS_STAFF_PINS.size === 0 && !REWARDS_STAFF_PIN) return '';
+  if (REWARDS_STAFF_PINS.size > 0 && REWARDS_STAFF_PINS.has(p)) return REWARDS_STAFF_PINS.get(p);
+  if (REWARDS_STAFF_PIN && p === REWARDS_STAFF_PIN) return 'staff';
+  return null;
+}
 
 // LEGACY — Catalogo v1 (solo % de descuento). Ya NO lo usa nadie: desde la
 // decision F0 (crédito calibrado, 23-jul-2026) el catálogo se personaliza por
@@ -1650,7 +1672,8 @@ async function rewardsBuildQrIndex() {
 app.post('/rewards/scan', async (req, res) => {
   const body = req.body || {};
   const code = String(body.code || '').trim().toUpperCase();
-  if (REWARDS_STAFF_PIN && String(body.pin || '') !== REWARDS_STAFF_PIN) {
+  const staffScan = rewardsStaffFromPin(body.pin);
+  if (staffScan === null) {
     return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
   }
   if (!/^FLM-[A-Z]{2}-\d{4}-[A-Z]\d[A-Z]\d$/.test(code)) {
@@ -1679,7 +1702,7 @@ app.post('/rewards/scan', async (req, res) => {
       nombre: out.member.name,
       email: out.member.email,
       order_number: body.order_number || '',
-      staff_name: body.staff_name || '',
+      staff_name: staffScan || String(body.staff_name || '').trim(),
       ip: rewardsClientIp(req),
       ua: rewardsClientUa(req)
     });
@@ -1702,7 +1725,8 @@ app.post('/rewards/scan', async (req, res) => {
 // crédito, 1 crédito Rewards por orden, orden cancelada rechazada.
 app.post('/rewards/pagar', async (req, res) => {
   const body = req.body || {};
-  if (REWARDS_STAFF_PIN && String(body.pin || '') !== REWARDS_STAFF_PIN) {
+  const staffPagar = rewardsStaffFromPin(body.pin);
+  if (staffPagar === null) {
     return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
   }
   const code = String(body.code || '').trim().toUpperCase();
@@ -1805,7 +1829,7 @@ app.post('/rewards/pagar', async (req, res) => {
     // 5) registrar en el Ledger: fila de canje (manda el email al cliente) y
     //    de inmediato marcarla 'aplicado' con la orden y el staff. Si el Ledger
     //    falla DESPUÉS de aplicar la línea, avisar para registro manual.
-    const staffName = String(body.staff_name || '').trim();
+    const staffName = staffPagar || String(body.staff_name || '').trim();
     const wrote = await rewardsLedgerWrite({
       tipo: 'canje',
       folio: folio,
@@ -1864,7 +1888,7 @@ app.post('/rewards/pagar', async (req, res) => {
 // {ok, found, folio:{folio,fecha,customer_id,email,nombre,reward,points,
 //  discount_pct,estado,orden_aplicada}}.
 app.get('/rewards/folio', async (req, res) => {
-  if (REWARDS_STAFF_PIN && String(req.query.pin || '') !== REWARDS_STAFF_PIN) {
+  if (rewardsStaffFromPin(req.query.pin) === null) {
     return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
   }
   const folio = String(req.query.f || '').trim().toUpperCase();
@@ -1892,7 +1916,8 @@ app.get('/rewards/folio', async (req, res) => {
 // el .gs responde {ok, updated:bool, estado_previo}.
 app.post('/rewards/folio/aplicar', async (req, res) => {
   const body = req.body || {};
-  if (REWARDS_STAFF_PIN && String(body.pin || '') !== REWARDS_STAFF_PIN) {
+  const staffAplicar = rewardsStaffFromPin(body.pin);
+  if (staffAplicar === null) {
     return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
   }
   const folio = String(body.folio || '').trim().toUpperCase();
@@ -1910,7 +1935,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
         tipo: 'aplicar',
         folio: folio,
         order_number: orderNumber,
-        staff_name: String(body.staff_name || '').trim()
+        staff_name: staffAplicar || String(body.staff_name || '').trim()
       }),
       redirect: 'follow'
     });
