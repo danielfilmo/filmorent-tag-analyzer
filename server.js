@@ -1116,6 +1116,7 @@ app.get('/backfill/scan', async (req, res) => {
 //   - QR determinstico del customer_id, formato FLM-XX-YYYY-XXNX. Hash FNV-1a
 //     32-bit (el hash del prototipo — suma de charCodes — solo producia ~30k
 //     valores => colisiones casi seguras entre ~2k miembros).
+// Deploys automatizados con token fine-grained desde 27-jul-2026.
 // ============================================================
 
 const BOOQABLE_API_KEY = process.env.BOOQABLE_API_KEY;
