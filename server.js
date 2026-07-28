@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.5', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.7', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED }));
 
 function extractContactId(body) {
   return (
@@ -1135,14 +1135,198 @@ const REWARDS_STAFF_PINS = (() => {
   });
   return map;
 })();
-// Valida un PIN de staff. Devuelve: nombre del empleado (PINs individuales),
-// 'staff' (PIN genérico), '' (sin PINs configurados: acceso libre) o null (inválido).
-function rewardsStaffFromPin(pin) {
-  const p = String(pin || '').trim();
-  if (REWARDS_STAFF_PINS.size === 0 && !REWARDS_STAFF_PIN) return '';
-  if (REWARDS_STAFF_PINS.size > 0 && REWARDS_STAFF_PINS.has(p)) return REWARDS_STAFF_PINS.get(p);
-  if (REWARDS_STAFF_PIN && p === REWARDS_STAFF_PIN) return 'staff';
+// (La antigua rewardsStaffFromPin() devolvía '' cuando no había PINs en el env
+//  = acceso libre al mostrador. Se ELIMINÓ en la auditoría del 25-jul-2026:
+//  la validación del PIN vive ahora dentro de rewardsStaffFrom(), fail-closed.)
+
+// ── v8.6: LOGIN DE STAFF CON GOOGLE WORKSPACE ────────────────
+// Decisión de Daniel 25-jul-2026: el mostrador se identifica con la cuenta
+// corporativa (@filmorent.com), no con un PIN compartido. Al dar de baja a
+// alguien en Workspace pierde el acceso solo; el Ledger registra su email real.
+// El navegador manda el ID token de Google Identity Services; aquí se VERIFICA
+// contra Google (endpoint oficial tokeninfo — evita meter dependencias nuevas
+// al package.json de producción) y se exige: firma válida, aud == nuestro
+// client id, no expirado, email verificado y dominio corporativo.
+const REWARDS_GOOGLE_CLIENT_ID = process.env.REWARDS_GOOGLE_CLIENT_ID || '';
+const REWARDS_STAFF_DOMAIN = (process.env.REWARDS_STAFF_DOMAIN || 'filmorent.com').toLowerCase();
+// Allowlist opcional: si trae emails, SOLO esos entran (aunque sean del dominio).
+const REWARDS_STAFF_EMAILS = new Set(
+  String(process.env.REWARDS_STAFF_EMAILS || '')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+);
+// Cache de tokens ya verificados (clave = token, valor = {name, exp}). Evita
+// pegarle a Google en cada request del mostrador; caduca con el propio token.
+const rewardsTokenCache = new Map();
+
+async function rewardsStaffFromGoogle(idToken) {
+  const tok = String(idToken || '').trim();
+  if (!tok) return null;
+  const now = Math.floor(Date.now() / 1000);
+  const hit = rewardsTokenCache.get(tok);
+  if (hit && hit.exp > now + 30) return hit.name;
+  try {
+    const r = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(tok));
+    if (!r.ok) return null;
+    const t = await r.json();
+    // aud: el token DEBE haber sido emitido para nuestro client id
+    if (!REWARDS_GOOGLE_CLIENT_ID || t.aud !== REWARDS_GOOGLE_CLIENT_ID) {
+      console.error('[rewards] token de Google con aud incorrecto');
+      return null;
+    }
+    if (String(t.iss || '').indexOf('accounts.google.com') === -1) return null;
+    const exp = parseInt(t.exp, 10) || 0;
+    if (!exp || exp <= now) return null;
+    if (String(t.email_verified) !== 'true') return null;
+    const email = String(t.email || '').toLowerCase();
+    // 'hd' (hosted domain) SOLO lo emite Google para cuentas Workspace del
+    // dominio; el sufijo del email no basta (auditoría 25-jul). Se exige hd
+    // Y que el email termine en el mismo dominio.
+    const domain = String(t.hd || '').toLowerCase();
+    if (domain !== REWARDS_STAFF_DOMAIN || email.slice(-(REWARDS_STAFF_DOMAIN.length + 1)) !== ('@' + REWARDS_STAFF_DOMAIN)) {
+      console.error('[rewards] login de staff rechazado (dominio ' + domain + ')');
+      return null;
+    }
+    if (REWARDS_STAFF_EMAILS.size > 0 && !REWARDS_STAFF_EMAILS.has(email)) {
+      console.error('[rewards] login de staff fuera de la lista: ' + email);
+      return null;
+    }
+    const name = String(t.name || '').trim() || email;
+    if (rewardsTokenCache.size > 200) rewardsTokenCache.clear();
+    rewardsTokenCache.set(tok, { name: name, exp: exp });
+    return name;
+  } catch (e) {
+    console.error('[rewards] error verificando token de Google: ' + e.message);
+    return null;
+  }
+}
+
+// ── FAIL-CLOSED (auditoría 25-jul-2026) ──────────────────────
+// Antes, "sin PINs configurados" significaba ACCESO LIBRE: al retirar el PIN
+// para dejar solo Google, los 4 endpoints de mostrador (incluido /pagar, que
+// mueve dinero real en Booqable) quedaban abiertos a internet. Ahora:
+// sin credencial válida NO se pasa, y si NO hay ninguna forma de auth
+// configurada el mostrador responde 503 (deshabilitado), nunca "pásale".
+const REWARDS_STAFF_PROTECTED = !!(REWARDS_GOOGLE_CLIENT_ID || REWARDS_STAFF_PIN || REWARDS_STAFF_PINS.size > 0);
+// Escotilla explícita SOLO para desarrollo local: se ignora en Render aunque
+// alguien la ponga por error en el env de producción.
+const REWARDS_STAFF_OPEN = process.env.REWARDS_STAFF_OPEN === '1' &&
+  !process.env.RENDER && process.env.NODE_ENV !== 'production';
+// Config rota (env de PINs escrita pero ninguna pareja válida) => tratar como
+// mal configurado y bloquear, no como "sin protección".
+const REWARDS_STAFF_PINS_BROKEN = !!String(process.env.REWARDS_STAFF_PINS || '').trim() && REWARDS_STAFF_PINS.size === 0;
+
+// ── ANTI-FUERZA-BRUTA DEL PIN ────────────────────────────────
+// La IP del cliente NO es confiable (cualquier header se puede falsificar y el
+// portal pega directo al origin de Render), así que el candado REAL no puede
+// depender de ella. Diseño (2ª auditoría 25-jul-2026):
+//   · Solo cuentan los intentos que TRAEN un PIN — un anónimo no puede
+//     provocar el bloqueo del equipo (evita el DoS).
+//   · Tope GLOBAL de intentos de PIN por ventana, con backoff exponencial:
+//     cada vez que se agota, el PIN queda deshabilitado el doble de tiempo
+//     (15 min → 30 → 60 → … hasta 8 h). El login de Google NUNCA se bloquea,
+//     así que el mostrador puede seguir operando durante un ataque.
+//   · El contador por IP se conserva solo como señal para los logs.
+const rewardsAuthFails = new Map();
+const AUTH_WINDOW_MS = 15 * 60 * 1000;
+const PIN_FAILS_MAX = 25;                 // intentos de PIN por ventana
+let rewardsPinGate = { start: 0, n: 0, strikes: 0, blockedUntil: 0 };
+
+function rewardsPinDisabled() {
+  return Date.now() < rewardsPinGate.blockedUntil;
+}
+// Registra un intento FALLIDO que sí traía credencial de PIN.
+function rewardsPinFail(ip) {
+  const now = Date.now();
+  if (now - rewardsPinGate.start > AUTH_WINDOW_MS) {
+    rewardsPinGate.start = now;
+    rewardsPinGate.n = 0;
+    if (now - rewardsPinGate.blockedUntil > 6 * 3600 * 1000) rewardsPinGate.strikes = 0; // se calma solo
+  }
+  rewardsPinGate.n++;
+  let b = rewardsAuthFails.get(ip);
+  if (!b || now - b.start > AUTH_WINDOW_MS) { b = { start: now, n: 0 }; rewardsAuthFails.set(ip, b); }
+  b.n++;
+  if (rewardsAuthFails.size > 5000) rewardsAuthFails.clear();
+  if (rewardsPinGate.n >= PIN_FAILS_MAX) {
+    rewardsPinGate.strikes = Math.min(rewardsPinGate.strikes + 1, 5);
+    const castigo = AUTH_WINDOW_MS * Math.pow(2, rewardsPinGate.strikes - 1); // 15m,30m,1h,2h,4h
+    rewardsPinGate.blockedUntil = now + castigo;
+    rewardsPinGate.n = 0;
+    console.error('[rewards] PIN de staff DESHABILITADO ' + Math.round(castigo / 60000) +
+      ' min por exceso de intentos fallidos (ultimo desde ' + ip + '). El login de Google sigue activo.');
+  } else {
+    console.error('[rewards] intento de PIN fallido desde ' + ip +
+      ' (' + rewardsPinGate.n + '/' + PIN_FAILS_MAX + ' en la ventana global)');
+  }
+}
+
+// Máximo 3 canjes por miembro cada 24 h (el portal del cliente no tiene login).
+const rewardsRedeemsPorMiembro = new Map();
+function rewardsRedeemAllowed(customerId) {
+  const now = Date.now();
+  let b = rewardsRedeemsPorMiembro.get(customerId);
+  if (!b || now - b.start > 24 * 3600 * 1000) { b = { start: now, n: 0 }; rewardsRedeemsPorMiembro.set(customerId, b); }
+  if (b.n >= 3) return false;
+  b.n++;
+  if (rewardsRedeemsPorMiembro.size > 5000) rewardsRedeemsPorMiembro.clear();
+  return true;
+}
+
+// Comparación de secretos en tiempo constante (evita filtrar el PIN por timing)
+function rewardsSecretEq(a, b) {
+  const x = String(a || ''), y = String(b || '');
+  let d = x.length ^ y.length;
+  const n = Math.max(x.length, y.length);
+  for (let i = 0; i < n; i++) d |= (x.charCodeAt(i) || 0) ^ (y.charCodeAt(i) || 0);
+  return d === 0;
+}
+
+// Credenciales de una petición: header Authorization (preferido — no queda en
+// logs ni en el referer), luego body, luego query (solo para el PIN).
+function rewardsAuthSrc(req) {
+  const h = String(req.headers.authorization || '');
+  const bearer = /^Bearer\s+(.+)$/i.exec(h);
+  const b = req.body || {};
+  const q = req.query || {};
+  return {
+    id_token: (bearer && bearer[1]) || b.id_token || q.id_token || '',
+    pin: b.pin || q.pin || ''
+  };
+}
+
+// Identifica al staff de una petición: primero Google Workspace, si no hay
+// token cae al PIN (respaldo). Devuelve el nombre a registrar en el Ledger,
+// o null si no hay credencial válida.
+async function rewardsStaffFrom(req) {
+  const s = rewardsAuthSrc(req);
+  const ip = rewardsClientIp(req);
+  const tokenName = await rewardsStaffFromGoogle(s.id_token);
+  if (tokenName) return tokenName;
+  const pin = String(s.pin || '').trim();
+  if (pin && !rewardsPinDisabled() && !REWARDS_STAFF_PINS_BROKEN) {
+    // comparación de tiempo constante (no filtra el PIN por timing)
+    if (REWARDS_STAFF_PINS.size > 0) {
+      for (const [k, nombre] of REWARDS_STAFF_PINS) if (rewardsSecretEq(pin, k)) return nombre;
+    }
+    if (REWARDS_STAFF_PIN && rewardsSecretEq(pin, REWARDS_STAFF_PIN)) return 'staff';
+  }
+  // desarrollo local sin ninguna auth configurada
+  if (!REWARDS_STAFF_PROTECTED && REWARDS_STAFF_OPEN) return 'dev';
+  // SOLO cuentan los fallos que traían credencial: un anónimo no puede
+  // provocar el bloqueo del PIN de todo el equipo
+  if (pin) rewardsPinFail(ip);
   return null;
+}
+
+// Guard de los endpoints de mostrador. true = ya respondió (denegado).
+function rewardsStaffDenied(res, staffName) {
+  if (staffName) return false;
+  if (!REWARDS_STAFF_PROTECTED) {
+    res.status(503).json({ ok: false, error: 'mostrador deshabilitado: falta configurar el acceso de staff' });
+    return true;
+  }
+  res.status(401).json({ ok: false, error: 'inicia sesion con tu cuenta @' + REWARDS_STAFF_DOMAIN + ' (o usa tu PIN)' });
+  return true;
 }
 
 // LEGACY — Catalogo v1 (solo % de descuento). Ya NO lo usa nadie: desde la
@@ -1236,10 +1420,18 @@ const REWARDS_ORIGINS = [
 // Rate limit simple por IP (el endpoint es publico y devuelve datos de miembro):
 // 30 requests por ventana de 5 min. En memoria — suficiente para un solo dyno.
 const rewardsRate = new Map();
-// IP real del cliente (x-forwarded-for primero — Render corre detras de proxy)
-// y user-agent recortado. Los usan el rate limiter y el audit trail del Ledger.
+// IP aproximada del cliente, para el rate limit y el audit trail del Ledger.
+// ⚠️ NO ES CONFIABLE para seguridad: el portal pega directo al origin de Render
+// y cualquiera puede mandar los headers que quiera (2ª auditoría 25-jul-2026).
+// Por eso el candado del PIN es un tope GLOBAL con backoff, no un bloqueo por
+// IP. Aquí se prefiere el primer x-forwarded-for porque es el que trae la IP
+// pública real del cliente en el tráfico legítimo (verificado en el Ledger).
 function rewardsClientIp(req) {
-  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || 'desconocida';
+  const xff = String(req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (xff.length) return xff[0].slice(0, 60);
+  const cf = String(req.headers['cf-connecting-ip'] || '').trim();
+  if (cf) return cf.slice(0, 60);
+  return String(req.ip || 'desconocida').slice(0, 60);
 }
 function rewardsClientUa(req) {
   return String(req.headers['user-agent'] || '').slice(0, 150);
@@ -1260,7 +1452,8 @@ app.use('/rewards', (req, res, next) => {
   }
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // 'Authorization' habilita mandar el ID token en header (fuera de la URL)
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (!BOOQABLE_API_KEY) return res.status(503).json({ ok: false, error: 'rewards deshabilitado: falta BOOQABLE_API_KEY en el env' });
   if (!rewardsRateOk(rewardsClientIp(req))) return res.status(429).json({ ok: false, error: 'demasiadas solicitudes, espera unos minutos' });
@@ -1468,14 +1661,25 @@ async function rewardsLedgerSummary(customerId) {
   }
 }
 
+// Todo texto que acaba en una celda del Sheet: recortado y neutralizado contra
+// inyección de fórmulas (un nombre de cliente que empiece con = + - @ lo
+// interpretaría Sheets como fórmula). Auditoría 25-jul-2026.
+function rewardsCellSafe(v) {
+  if (typeof v !== 'string') return v;
+  const s = v.slice(0, 300);
+  return /^[=+\-@\t\r]/.test(s) ? "'" + s : s;
+}
+
 // Escribe una fila al Ledger (Apps Script doPost). true/false.
 async function rewardsLedgerWrite(row) {
   if (!REWARDS_SHEETS_URL) return false;
+  const safe = {};
+  Object.keys(row || {}).forEach(k => { safe[k] = rewardsCellSafe(row[k]); });
   try {
     const r = await fetch(REWARDS_SHEETS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(row),
+      body: JSON.stringify(safe),
       redirect: 'follow'
     });
     if (!r.ok) { console.error('rewards ledger write failed: ' + r.status); return false; }
@@ -1590,6 +1794,13 @@ app.post('/rewards/redeem', async (req, res) => {
       return res.status(409).json({ ok: false, error: 'puntos insuficientes', points_available: available });
     }
 
+    // Tope de canjes por miembro/día: el portal del cliente no tiene login
+    // (entra con su email), así que sin esto un tercero podría quemarle los
+    // puntos a un miembro creando canjes en cadena (auditoría 25-jul-2026).
+    if (!rewardsRedeemAllowed(customer.id)) {
+      return res.status(429).json({ ok: false, error: 'ya hiciste varios canjes hoy; escríbenos por WhatsApp para ayudarte' });
+    }
+
     const credito = rewardsFormatMXN(reward.credito_cents);
     const folio = 'RWD-' + Date.now().toString(36).toUpperCase() + '-' +
       Math.random().toString(36).slice(2, 6).toUpperCase();
@@ -1672,10 +1883,8 @@ async function rewardsBuildQrIndex() {
 app.post('/rewards/scan', async (req, res) => {
   const body = req.body || {};
   const code = String(body.code || '').trim().toUpperCase();
-  const staffScan = rewardsStaffFromPin(body.pin);
-  if (staffScan === null) {
-    return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
-  }
+  const staffScan = await rewardsStaffFrom(req);
+  if (rewardsStaffDenied(res, staffScan)) return;
   if (!/^FLM-[A-Z]{2}-\d{4}-[A-Z]\d[A-Z]\d$/.test(code)) {
     return res.status(400).json({ ok: false, error: 'formato de codigo invalido (esperado FLM-XX-YYYY-XNXN)' });
   }
@@ -1702,7 +1911,9 @@ app.post('/rewards/scan', async (req, res) => {
       nombre: out.member.name,
       email: out.member.email,
       order_number: body.order_number || '',
-      staff_name: staffScan || String(body.staff_name || '').trim(),
+      // identidad VERIFICADA (Google/PIN); nunca el staff_name que mande el
+      // navegador — ese campo ya no es identidad (auditoría 25-jul)
+      staff_name: staffScan,
       ip: rewardsClientIp(req),
       ua: rewardsClientUa(req)
     });
@@ -1725,10 +1936,8 @@ app.post('/rewards/scan', async (req, res) => {
 // crédito, 1 crédito Rewards por orden, orden cancelada rechazada.
 app.post('/rewards/pagar', async (req, res) => {
   const body = req.body || {};
-  const staffPagar = rewardsStaffFromPin(body.pin);
-  if (staffPagar === null) {
-    return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
-  }
+  const staffPagar = await rewardsStaffFrom(req);
+  if (rewardsStaffDenied(res, staffPagar)) return;
   const code = String(body.code || '').trim().toUpperCase();
   const email = String(body.email || '').trim().toLowerCase();
   const rewardId = parseInt(body.reward_id, 10);
@@ -1829,7 +2038,7 @@ app.post('/rewards/pagar', async (req, res) => {
     // 5) registrar en el Ledger: fila de canje (manda el email al cliente) y
     //    de inmediato marcarla 'aplicado' con la orden y el staff. Si el Ledger
     //    falla DESPUÉS de aplicar la línea, avisar para registro manual.
-    const staffName = staffPagar || String(body.staff_name || '').trim();
+    const staffName = staffPagar;   // identidad verificada, no el body
     const wrote = await rewardsLedgerWrite({
       tipo: 'canje',
       folio: folio,
@@ -1888,9 +2097,8 @@ app.post('/rewards/pagar', async (req, res) => {
 // {ok, found, folio:{folio,fecha,customer_id,email,nombre,reward,points,
 //  discount_pct,estado,orden_aplicada}}.
 app.get('/rewards/folio', async (req, res) => {
-  if (rewardsStaffFromPin(req.query.pin) === null) {
-    return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
-  }
+  const staffFolio = await rewardsStaffFrom(req);
+  if (rewardsStaffDenied(res, staffFolio)) return;
   const folio = String(req.query.f || '').trim().toUpperCase();
   if (folio.indexOf('RWD-') !== 0 || folio.length < 6) {
     return res.status(400).json({ ok: false, error: 'folio invalido (esperado RWD-...)' });
@@ -1916,10 +2124,8 @@ app.get('/rewards/folio', async (req, res) => {
 // el .gs responde {ok, updated:bool, estado_previo}.
 app.post('/rewards/folio/aplicar', async (req, res) => {
   const body = req.body || {};
-  const staffAplicar = rewardsStaffFromPin(body.pin);
-  if (staffAplicar === null) {
-    return res.status(401).json({ ok: false, error: 'PIN de staff invalido' });
-  }
+  const staffAplicar = await rewardsStaffFrom(req);
+  if (rewardsStaffDenied(res, staffAplicar)) return;
   const folio = String(body.folio || '').trim().toUpperCase();
   const orderNumber = String(body.order_number || '').trim();
   if (folio.indexOf('RWD-') !== 0 || folio.length < 6) {
@@ -1935,7 +2141,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
         tipo: 'aplicar',
         folio: folio,
         order_number: orderNumber,
-        staff_name: staffAplicar || String(body.staff_name || '').trim()
+        staff_name: staffAplicar   // identidad verificada, no el body
       }),
       redirect: 'follow'
     });
@@ -1955,7 +2161,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
       });
     }
     console.log('[rewards] folio ' + folio + ' aplicado a orden ' + orderNumber +
-      (body.staff_name ? ' por ' + String(body.staff_name).trim() : ''));
+      ' por ' + staffAplicar);
     return res.json({ ok: true, updated: true, estado_previo: j.estado_previo || 'pendiente' });
   } catch (e) {
     console.error('[rewards] folio/aplicar error: ' + e.message);
