@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.7', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.8', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -395,9 +395,9 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     const agentRolesInfo = humans.map(a => {
       const role = getAgentRole(a.name);
       const roleDesc = {
-        'owner': 'due‚àö¬±o del negocio',
-        'admin': 'administraci‚àö‚â•n (facturaci‚àö‚â•n, cobranza, log‚àö‚â†stica)',
-        'sales': 'ventas y atenci‚àö‚â•n al cliente'
+        'owner': 'due√±o del negocio',
+        'admin': 'administraci√≥n (facturaci√≥n, cobranza, log√≠stica)',
+        'sales': 'ventas y atenci√≥n al cliente'
       };
       return a.name + ' (' + (roleDesc[role] || role) + ')';
     }).join(', ');
@@ -448,7 +448,7 @@ Lee TODA la conversacion de principio a fin. Entiende:
 - Que necesitaba el cliente
 - Como respondio el equipo EN CONJUNTO
 - Cual fue el resultado final
-- Las NOTAS INTERNAS son instrucciones del due‚àö¬±o (Daniel Alonso) al equipo. Seguirlas es CORRECTO.
+- Las NOTAS INTERNAS son instrucciones del due√±o (Daniel Alonso) al equipo. Seguirlas es CORRECTO.
 
 === PASO 2: REGLAS CRITICAS DE EVALUACION ===
 
@@ -460,9 +460,9 @@ REGLA 3 - ROLES DIFERENTES: Cada agente tiene un ROL diferente:
 ${agentRolesInfo}
 - Agentes de ADMIN: Evaluar en facturacion, cobranza, logistica. NO penalizar por "no conocer equipos".
 - Agentes de VENTAS: Evaluar en atencion, conocimiento de equipos, cierre de rentas.
-- El DUE‚àö√´O: Generalmente da instrucciones internas, no evaluarlo a menos que interactue con el cliente.
+- El DUE√ëO: Generalmente da instrucciones internas, no evaluarlo a menos que interactue con el cliente.
 
-REGLA 4 - NOTAS INTERNAS: Los mensajes marcados "NOTA INTERNA" son instrucciones del due‚àö¬±o al equipo. Si un agente sigue una instruccion interna (ej: "ofrecele la ZVE10"), eso es CORRECTO. No penalizar por "introducir informacion no solicitada" cuando fue una instruccion.
+REGLA 4 - NOTAS INTERNAS: Los mensajes marcados "NOTA INTERNA" son instrucciones del due√±o al equipo. Si un agente sigue una instruccion interna (ej: "ofrecele la ZVE10"), eso es CORRECTO. No penalizar por "introducir informacion no solicitada" cuando fue una instruccion.
 
 REGLA 5 - ENFOCARSE EN LO IMPORTANTE: Evalua lo que REALMENTE importa para el negocio:
 - Se atendio bien al cliente?
@@ -495,7 +495,7 @@ Criterios por agente humano (1-10):
 TAGS A EVALUAR:
 1. "consulta-compra" - Cliente pregunta por COMPRAR equipo (Filmorent solo renta).
 2. "equipo-no-disponible" - Equipo no disponible (no existe O ya rentado).
-3. "incidencia" - Problema, queja, equipo da‚àö¬±ado, entrega tarde.
+3. "incidencia" - Problema, queja, equipo da√±ado, entrega tarde.
 4. "renta-perdida" - Cliente queria rentar pero NO se concreto. Causa: "precio", "sin_respuesta_cliente", "tardanza_respuesta", "fechas", "ubicacion", "otro".
 
 Responde UNICAMENTE con JSON valido (sin markdown, sin backticks, solo JSON puro):
@@ -725,8 +725,8 @@ IMPORTANTE:
 - Maximo 8-10 lineas
 - Se directo y practico, esto es para que el agente sepa que paso SIN tener que leer todo
 - Si hubo multiples conversaciones/ciclos, resume TODOS, no solo el ultimo
-- Usa formato simple con vi‚àö¬±etas
-- Escribe en espa‚àö¬±ol
+- Usa formato simple con vi√±etas
+- Escribe en espa√±ol
 
 === HISTORIAL COMPLETO DEL CLIENTE: ${contactName} ===
 ${formattedMessages}
@@ -754,7 +754,7 @@ Genera el resumen ahora:`;
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          text: 'Ô£ø√º¬ß√± RESUMEN AUTOMATICO (IA)\n‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö\n' + summary + '\n‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö‚Äö√Æ√Ö\nÔ£ø√º√¨√π Resumen generado al reabrir conversacion'
+          text: 'ü§ñ RESUMEN AUTOMATICO (IA)\n‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ\n' + summary + '\n‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ‚îÅ\nüìù Resumen generado al reabrir conversacion'
         })
       }
     );
@@ -773,7 +773,7 @@ Genera el resumen ahora:`;
 
 
 // ============================================================
-// v7.3: CALL ENDED ‚Äö√Ñ√Æ analiza la transcripcion de una llamada
+// v7.3: CALL ENDED ‚Äî analiza la transcripcion de una llamada
 // (Respond.io Voice AI / llamadas) y aplica tags. Si no hay
 // transcript (llamada perdida o sin grabacion), se omite.
 // ============================================================
@@ -904,11 +904,11 @@ app.post('/webhook/call-ended', async (req, res) => {
 });
 
 
-// ‚Äö√Æ√Ñ‚Äö√Æ√Ñ v7.4 BACKFILL (30-jul-2026) ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ‚Äö√Æ√Ñ
-// Rellena huecos del Log de Conversaciones (ej. 15-jun‚Äö√ú√≠13-jul 2026, cuando el
+// ‚îÄ‚îÄ v7.4 BACKFILL (30-jul-2026) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// Rellena huecos del Log de Conversaciones (ej. 15-jun‚Üí13-jul 2026, cuando el
 // modelo Claude descontinuado rompia el analisis). READ-ONLY: solo ENUMERA los
 // contactId cuyo "ultimo mensaje entrante" cae en el rango, via POST /contact/list
-// (API v2). No reprocesa ni escribe nada aqui ‚Äö√Ñ√Æ de eso se encarga el script local
+// (API v2). No reprocesa ni escribe nada aqui ‚Äî de eso se encarga el script local
 // webhook-server/backfill.py, que es resumible (no duplica filas al re-correr).
 //
 // Protegido: requiere la env BACKFILL_TOKEN. Si NO esta seteada, el endpoint esta
@@ -923,7 +923,7 @@ const BACKFILL_FIELD_CANDIDATES = [
 ];
 const BACKFILL_FMT_CANDIDATES = ['ms', 'iso', 's', 'datetime'];
 
-// pagination.next puede ser un cursor pelon o una URL con ?cursorId=... ‚Äö√Ñ√Æ extrae el cursor.
+// pagination.next puede ser un cursor pelon o una URL con ?cursorId=... ‚Äî extrae el cursor.
 function backfillNextCursor(next) {
   if (!next) return null;
   const s = String(next);
@@ -1041,7 +1041,7 @@ app.get('/backfill', async (req, res) => {
   }
 });
 
-// ‚Äö√Æ√Ñ‚Äö√Æ√Ñ v7.5 BACKFILL SCAN (para el hueco COMPLETO, incl. clientes recurrentes) ‚Äö√Æ√Ñ‚Äö√Æ√Ñ
+// ‚îÄ‚îÄ v7.5 BACKFILL SCAN (para el hueco COMPLETO, incl. clientes recurrentes) ‚îÄ‚îÄ
 // La API publica solo deja filtrar contactos por createdAt (no por "ultimo mensaje").
 // Para atrapar tambien a los recurrentes activos en la ventana, este endpoint pagina
 // TODOS los contactos (por createdAt <= to) y para cada uno mira el timestamp de su
@@ -1130,9 +1130,9 @@ app.get('/backfill/scan', async (req, res) => {
 
 
 // ============================================================
-// v8.0 FILMORENT REWARDS (Pilar 6) ‚Äî 22-jul-2026
+// v8.0 FILMORENT REWARDS (Pilar 6) — 22-jul-2026
 // Proxy server-side de Booqable para el portal rewards.filmorent.com.
-// La key de Booqable vive en env (BOOQABLE_API_KEY) ‚Äî NUNCA en el frontend.
+// La key de Booqable vive en env (BOOQABLE_API_KEY) — NUNCA en el frontend.
 //
 //   GET  /rewards/member?email=...  -> puntos, tier-data, historial (calculado
 //                                      de Booqable EN VIVO, excluyendo lineas
@@ -1143,20 +1143,20 @@ app.get('/backfill/scan', async (req, res) => {
 //   POST /rewards/folio/aplicar     -> staff: marca un folio como aplicado a orden
 //
 // Persistencia: Google Sheet "Rewards Ledger" via Apps Script (doPost para
-// escribir canjes/scans, doGet para leer canjes por customer) ‚Äî mismo patron
+// escribir canjes/scans, doGet para leer canjes por customer) — mismo patron
 // logToGoogleSheets que el Log de Conversaciones. Env: REWARDS_SHEETS_URL.
 //
 // Reglas de negocio (pilar6-rewards/README.md):
 //   - 1 pt / $100 MXN. Base = grand_total_in_cents (sin IVA) de ordenes con
-//     status distinto de draft/concept/canceled ‚Äî verificado que la suma
+//     status distinto de draft/concept/canceled — verificado que la suma
 //     coincide EXACTO con customer.revenue_in_cents.
 //   - La linea del producto ELSEPC no genera puntos (subrenta: 90% no es
 //     ingreso nuestro). El precio de linea viene CON IVA, asi que se convierte
 //     a base sin IVA con el ratio grand_total/grand_total_with_tax de su orden.
-//   - Canje = "cr√©dito calibrado" (decisi√≥n F0, 23-jul-2026): cr√©dito en pesos
+//   - Canje = "crédito calibrado" (decisión F0, 23-jul-2026): crédito en pesos
 //     por nivel de puntos, con doble tope y dedupe. Ver rewardsCatalogFor().
 //   - QR determinstico del customer_id, formato FLM-XX-YYYY-XXNX. Hash FNV-1a
-//     32-bit (el hash del prototipo ‚Äî suma de charCodes ‚Äî solo producia ~30k
+//     32-bit (el hash del prototipo — suma de charCodes — solo producia ~30k
 //     valores => colisiones casi seguras entre ~2k miembros).
 // Deploys automatizados con token fine-grained desde 27-jul-2026.
 // ============================================================
@@ -1164,10 +1164,10 @@ app.get('/backfill/scan', async (req, res) => {
 const BOOQABLE_API_KEY = process.env.BOOQABLE_API_KEY;
 const BOOQABLE_BASE = process.env.BOOQABLE_BASE || 'https://filmorent-sa-de-cv.booqable.com/api/4';
 const REWARDS_SHEETS_URL = process.env.REWARDS_SHEETS_URL; // Apps Script del Rewards Ledger
-const REWARDS_STAFF_PIN = process.env.REWARDS_STAFF_PIN;   // PIN gen√©rico (legacy/respaldo)
-// v8.5: PIN individual por empleado ‚Äî env REWARDS_STAFF_PINS con pares
+const REWARDS_STAFF_PIN = process.env.REWARDS_STAFF_PIN;   // PIN genérico (legacy/respaldo)
+// v8.5: PIN individual por empleado — env REWARDS_STAFF_PINS con pares
 // "1111:Suheidi,2222:Eduardo" (acepta pin:nombre o nombre:pin). Con esto el
-// Ledger registra QUI√âN hizo cada scan/canje/aplicaci√≥n con su propio PIN.
+// Ledger registra QUIÉN hizo cada scan/canje/aplicación con su propio PIN.
 const REWARDS_STAFF_PINS = (() => {
   const map = new Map();
   String(process.env.REWARDS_STAFF_PINS || '').split(',').forEach(pair => {
@@ -1178,19 +1178,22 @@ const REWARDS_STAFF_PINS = (() => {
   });
   return map;
 })();
-// (La antigua rewardsStaffFromPin() devolv√≠a '' cuando no hab√≠a PINs en el env
-//  = acceso libre al mostrador. Se ELIMIN√ì en la auditor√≠a del 25-jul-2026:
-//  la validaci√≥n del PIN vive ahora dentro de rewardsStaffFrom(), fail-closed.)
+// (La antigua rewardsStaffFromPin() devolvía '' cuando no había PINs en el env
+//  = acceso libre al mostrador. Se ELIMINÓ en la auditoría del 25-jul-2026:
+//  la validación del PIN vive ahora dentro de rewardsStaffFrom(), fail-closed.)
 
-// ‚îÄ‚îÄ v8.6: LOGIN DE STAFF CON GOOGLE WORKSPACE ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-// Decisi√≥n de Daniel 25-jul-2026: el mostrador se identifica con la cuenta
+// ── v8.6: LOGIN DE STAFF CON GOOGLE WORKSPACE ────────────────
+// Decisión de Daniel 25-jul-2026: el mostrador se identifica con la cuenta
 // corporativa (@filmorent.com), no con un PIN compartido. Al dar de baja a
 // alguien en Workspace pierde el acceso solo; el Ledger registra su email real.
-// El navegador manda el ID token de Google Identity Services; aqu√≠ se VERIFICA
-// contra Google (endpoint oficial tokeninfo ‚Äî evita meter dependencias nuevas
-// al package.json de producci√≥n) y se exige: firma v√°lida, aud == nuestro
+// El navegador manda el ID token de Google Identity Services; aquí se VERIFICA
+// contra Google (endpoint oficial tokeninfo — evita meter dependencias nuevas
+// al package.json de producción) y se exige: firma válida, aud == nuestro
 // client id, no expirado, email verificado y dominio corporativo.
 const REWARDS_GOOGLE_CLIENT_ID = process.env.REWARDS_GOOGLE_CLIENT_ID || '';
+// Ventana para que el propio cliente reclame una renta desde su portal (self-service).
+// En mostrador no aplica: ahí lo registra un empleado autenticado.
+const REWARDS_ATRIB_DIAS = parseInt(process.env.REWARDS_ATRIB_DIAS || '14', 10);
 const REWARDS_STAFF_DOMAIN = (process.env.REWARDS_STAFF_DOMAIN || 'filmorent.com').toLowerCase();
 // Allowlist opcional: si trae emails, SOLO esos entran (aunque sean del dominio).
 const REWARDS_STAFF_EMAILS = new Set(
@@ -1222,7 +1225,7 @@ async function rewardsStaffFromGoogle(idToken) {
     if (String(t.email_verified) !== 'true') return null;
     const email = String(t.email || '').toLowerCase();
     // 'hd' (hosted domain) SOLO lo emite Google para cuentas Workspace del
-    // dominio; el sufijo del email no basta (auditor√≠a 25-jul). Se exige hd
+    // dominio; el sufijo del email no basta (auditoría 25-jul). Se exige hd
     // Y que el email termine en el mismo dominio.
     const domain = String(t.hd || '').toLowerCase();
     if (domain !== REWARDS_STAFF_DOMAIN || email.slice(-(REWARDS_STAFF_DOMAIN.length + 1)) !== ('@' + REWARDS_STAFF_DOMAIN)) {
@@ -1243,32 +1246,32 @@ async function rewardsStaffFromGoogle(idToken) {
   }
 }
 
-// ‚îÄ‚îÄ FAIL-CLOSED (auditor√≠a 25-jul-2026) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── FAIL-CLOSED (auditoría 25-jul-2026) ──────────────────────
 // Antes, "sin PINs configurados" significaba ACCESO LIBRE: al retirar el PIN
 // para dejar solo Google, los 4 endpoints de mostrador (incluido /pagar, que
 // mueve dinero real en Booqable) quedaban abiertos a internet. Ahora:
-// sin credencial v√°lida NO se pasa, y si NO hay ninguna forma de auth
-// configurada el mostrador responde 503 (deshabilitado), nunca "p√°sale".
+// sin credencial válida NO se pasa, y si NO hay ninguna forma de auth
+// configurada el mostrador responde 503 (deshabilitado), nunca "pásale".
 const REWARDS_STAFF_PROTECTED = !!(REWARDS_GOOGLE_CLIENT_ID || REWARDS_STAFF_PIN || REWARDS_STAFF_PINS.size > 0);
-// Escotilla expl√≠cita SOLO para desarrollo local: se ignora en Render aunque
-// alguien la ponga por error en el env de producci√≥n.
+// Escotilla explícita SOLO para desarrollo local: se ignora en Render aunque
+// alguien la ponga por error en el env de producción.
 const REWARDS_STAFF_OPEN = process.env.REWARDS_STAFF_OPEN === '1' &&
   !process.env.RENDER && process.env.NODE_ENV !== 'production';
-// Config rota (env de PINs escrita pero ninguna pareja v√°lida) => tratar como
-// mal configurado y bloquear, no como "sin protecci√≥n".
+// Config rota (env de PINs escrita pero ninguna pareja válida) => tratar como
+// mal configurado y bloquear, no como "sin protección".
 const REWARDS_STAFF_PINS_BROKEN = !!String(process.env.REWARDS_STAFF_PINS || '').trim() && REWARDS_STAFF_PINS.size === 0;
 
-// ‚îÄ‚îÄ ANTI-FUERZA-BRUTA DEL PIN ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── ANTI-FUERZA-BRUTA DEL PIN ────────────────────────────────
 // La IP del cliente NO es confiable (cualquier header se puede falsificar y el
-// portal pega directo al origin de Render), as√≠ que el candado REAL no puede
-// depender de ella. Dise√±o (2¬™ auditor√≠a 25-jul-2026):
-//   ¬∑ Solo cuentan los intentos que TRAEN un PIN ‚Äî un an√≥nimo no puede
+// portal pega directo al origin de Render), así que el candado REAL no puede
+// depender de ella. Diseño (2ª auditoría 25-jul-2026):
+//   · Solo cuentan los intentos que TRAEN un PIN — un anónimo no puede
 //     provocar el bloqueo del equipo (evita el DoS).
-//   ¬∑ Tope GLOBAL de intentos de PIN por ventana, con backoff exponencial:
+//   · Tope GLOBAL de intentos de PIN por ventana, con backoff exponencial:
 //     cada vez que se agota, el PIN queda deshabilitado el doble de tiempo
-//     (15 min ‚Üí 30 ‚Üí 60 ‚Üí ‚Ä¶ hasta 8 h). El login de Google NUNCA se bloquea,
-//     as√≠ que el mostrador puede seguir operando durante un ataque.
-//   ¬∑ El contador por IP se conserva solo como se√±al para los logs.
+//     (15 min → 30 → 60 → … hasta 8 h). El login de Google NUNCA se bloquea,
+//     así que el mostrador puede seguir operando durante un ataque.
+//   · El contador por IP se conserva solo como señal para los logs.
 const rewardsAuthFails = new Map();
 const AUTH_WINDOW_MS = 15 * 60 * 1000;
 const PIN_FAILS_MAX = 25;                 // intentos de PIN por ventana
@@ -1277,7 +1280,7 @@ let rewardsPinGate = { start: 0, n: 0, strikes: 0, blockedUntil: 0 };
 function rewardsPinDisabled() {
   return Date.now() < rewardsPinGate.blockedUntil;
 }
-// Registra un intento FALLIDO que s√≠ tra√≠a credencial de PIN.
+// Registra un intento FALLIDO que sí traía credencial de PIN.
 function rewardsPinFail(ip) {
   const now = Date.now();
   if (now - rewardsPinGate.start > AUTH_WINDOW_MS) {
@@ -1303,7 +1306,7 @@ function rewardsPinFail(ip) {
   }
 }
 
-// M√°ximo 3 canjes por miembro cada 24 h (el portal del cliente no tiene login).
+// Máximo 3 canjes por miembro cada 24 h (el portal del cliente no tiene login).
 const rewardsRedeemsPorMiembro = new Map();
 function rewardsRedeemAllowed(customerId) {
   const now = Date.now();
@@ -1315,7 +1318,7 @@ function rewardsRedeemAllowed(customerId) {
   return true;
 }
 
-// Comparaci√≥n de secretos en tiempo constante (evita filtrar el PIN por timing)
+// Comparación de secretos en tiempo constante (evita filtrar el PIN por timing)
 function rewardsSecretEq(a, b) {
   const x = String(a || ''), y = String(b || '');
   let d = x.length ^ y.length;
@@ -1324,7 +1327,7 @@ function rewardsSecretEq(a, b) {
   return d === 0;
 }
 
-// Credenciales de una petici√≥n: header Authorization (preferido ‚Äî no queda en
+// Credenciales de una petición: header Authorization (preferido — no queda en
 // logs ni en el referer), luego body, luego query (solo para el PIN).
 function rewardsAuthSrc(req) {
   const h = String(req.headers.authorization || '');
@@ -1337,9 +1340,9 @@ function rewardsAuthSrc(req) {
   };
 }
 
-// Identifica al staff de una petici√≥n: primero Google Workspace, si no hay
+// Identifica al staff de una petición: primero Google Workspace, si no hay
 // token cae al PIN (respaldo). Devuelve el nombre a registrar en el Ledger,
-// o null si no hay credencial v√°lida.
+// o null si no hay credencial válida.
 async function rewardsStaffFrom(req) {
   const s = rewardsAuthSrc(req);
   const ip = rewardsClientIp(req);
@@ -1347,7 +1350,7 @@ async function rewardsStaffFrom(req) {
   if (tokenName) return tokenName;
   const pin = String(s.pin || '').trim();
   if (pin && !rewardsPinDisabled() && !REWARDS_STAFF_PINS_BROKEN) {
-    // comparaci√≥n de tiempo constante (no filtra el PIN por timing)
+    // comparación de tiempo constante (no filtra el PIN por timing)
     if (REWARDS_STAFF_PINS.size > 0) {
       for (const [k, nombre] of REWARDS_STAFF_PINS) if (rewardsSecretEq(pin, k)) return nombre;
     }
@@ -1355,13 +1358,13 @@ async function rewardsStaffFrom(req) {
   }
   // desarrollo local sin ninguna auth configurada
   if (!REWARDS_STAFF_PROTECTED && REWARDS_STAFF_OPEN) return 'dev';
-  // SOLO cuentan los fallos que tra√≠an credencial: un an√≥nimo no puede
+  // SOLO cuentan los fallos que traían credencial: un anónimo no puede
   // provocar el bloqueo del PIN de todo el equipo
   if (pin) rewardsPinFail(ip);
   return null;
 }
 
-// Guard de los endpoints de mostrador. true = ya respondi√≥ (denegado).
+// Guard de los endpoints de mostrador. true = ya respondió (denegado).
 function rewardsStaffDenied(res, staffName) {
   if (staffName) return false;
   if (!REWARDS_STAFF_PROTECTED) {
@@ -1372,25 +1375,25 @@ function rewardsStaffDenied(res, staffName) {
   return true;
 }
 
-// LEGACY ‚Äî Catalogo v1 (solo % de descuento). Ya NO lo usa nadie: desde la
-// decision F0 (cr√©dito calibrado, 23-jul-2026) el cat√°logo se personaliza por
-// miembro con rewardsCatalogFor(). Se conserva solo como documentaci√≥n/fallback.
+// LEGACY — Catalogo v1 (solo % de descuento). Ya NO lo usa nadie: desde la
+// decision F0 (crédito calibrado, 23-jul-2026) el catálogo se personaliza por
+// miembro con rewardsCatalogFor(). Se conserva solo como documentación/fallback.
 const REWARDS_CATALOG = [
-  { id: 1, name: '5% descuento en tu pr√≥xima renta', points: 100, value: 5 },
-  { id: 2, name: '10% descuento en tu pr√≥xima renta', points: 250, value: 10 },
-  { id: 3, name: '15% descuento en tu pr√≥xima renta', points: 500, value: 15 },
-  { id: 4, name: '20% descuento en tu pr√≥xima renta', points: 800, value: 20 },
-  { id: 5, name: '25% descuento en tu pr√≥xima renta', points: 1200, value: 25 }
+  { id: 1, name: '5% descuento en tu próxima renta', points: 100, value: 5 },
+  { id: 2, name: '10% descuento en tu próxima renta', points: 250, value: 10 },
+  { id: 3, name: '15% descuento en tu próxima renta', points: 500, value: 15 },
+  { id: 4, name: '20% descuento en tu próxima renta', points: 800, value: 20 },
+  { id: 5, name: '25% descuento en tu próxima renta', points: 1200, value: 25 }
 ];
 
-// ‚îÄ‚îÄ Cr√©dito calibrado (decisi√≥n F0 de Daniel, 23-jul-2026) ‚îÄ‚îÄ
-// El premio deja de ser % y pasa a ser CR√âDITO EN PESOS con doble tope:
-//   cr√©dito del nivel = MIN(techo del nivel, 50% del ticket promedio del
-//   miembro redondeado a m√∫ltiplos de $50), con piso de $100.
-// Ids estables por nivel (el Ledger los referencia): 50‚Üí6 (escal√≥n de entrada,
-// nuevo), 100‚Üí1, 250‚Üí2, 500‚Üí3, 800‚Üí4, 1200‚Üí5. Reglas de mostrador que NO
+// ── Crédito calibrado (decisión F0 de Daniel, 23-jul-2026) ──
+// El premio deja de ser % y pasa a ser CRÉDITO EN PESOS con doble tope:
+//   crédito del nivel = MIN(techo del nivel, 50% del ticket promedio del
+//   miembro redondeado a múltiplos de $50), con piso de $100.
+// Ids estables por nivel (el Ledger los referencia): 50→6 (escalón de entrada,
+// nuevo), 100→1, 250→2, 500→3, 800→4, 1200→5. Reglas de mostrador que NO
 // cambian (solo copy): 1 canje por orden, el folio no da cambio, la orden debe
-// ser ‚â• 2√ó el cr√©dito.
+// ser ≥ 2× el crédito.
 const REWARDS_CREDIT_LEVELS = [
   { id: 6, points: 50,   cap_cents: 10000 },   // $100
   { id: 1, points: 100,  cap_cents: 25000 },   // $250
@@ -1406,11 +1409,11 @@ function rewardsFormatMXN(cents) {
   return '$' + String(pesos).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
-// Cat√°logo personalizado del miembro. DEDUPE: si el tope del ticket hace que
-// dos niveles den el mismo cr√©dito, solo se ofrece el de MENOS puntos ‚Äî cada
-// nivel listado debe dar un cr√©dito estrictamente mayor que el anterior.
+// Catálogo personalizado del miembro. DEDUPE: si el tope del ticket hace que
+// dos niveles den el mismo crédito, solo se ofrece el de MENOS puntos — cada
+// nivel listado debe dar un crédito estrictamente mayor que el anterior.
 function rewardsCatalogFor(avgTicketCents) {
-  // 50% del ticket promedio, redondeado a m√∫ltiplos de $50 (5000 centavos)
+  // 50% del ticket promedio, redondeado a múltiplos de $50 (5000 centavos)
   const halfTicket = Math.round((avgTicketCents || 0) / 2 / 5000) * 5000;
   const catalog = [];
   let prevCredit = 0;
@@ -1420,7 +1423,7 @@ function rewardsCatalogFor(avgTicketCents) {
     prevCredit = credit;
     catalog.push({
       id: lvl.id,
-      name: 'Cr√©dito de ' + rewardsFormatMXN(credit) + ' en tu pr√≥xima renta',
+      name: 'Crédito de ' + rewardsFormatMXN(credit) + ' en tu próxima renta',
       points: lvl.points,
       credito_cents: credit
     });
@@ -1428,26 +1431,26 @@ function rewardsCatalogFor(avgTicketCents) {
   return catalog;
 }
 
-// Nivel por RENTAS DE LOS √öLTIMOS 12 MESES (decisi√≥n de Daniel 24-jul-2026):
-// el estatus se gana y se defiende cada a√±o; los puntos canjeables NO caducan.
+// Nivel por RENTAS DE LOS ÚLTIMOS 12 MESES (decisión de Daniel 24-jul-2026):
+// el estatus se gana y se defiende cada año; los puntos canjeables NO caducan.
 // min en centavos SIN IVA de revenue rodante de 12 meses (base ya sin
-// exclusiones). Censo 24-jul: Plata $20k+/a√±o = 57 clientes (top 5% de 1,114
-// activos), Oro $100k+/a√±o = 5 clientes.
+// exclusiones). Censo 24-jul: Plata $20k+/año = 57 clientes (top 5% de 1,114
+// activos), Oro $100k+/año = 5 clientes.
 const REWARDS_TIERS = [
   { name: 'Bronce', min_12m_cents: 0, discount: 0 },
-  { name: 'Plata', min_12m_cents: 2000000, discount: 5 },   // $20,000 MXN/a√±o
-  { name: 'Oro', min_12m_cents: 10000000, discount: 10 }    // $100,000 MXN/a√±o
+  { name: 'Plata', min_12m_cents: 2000000, discount: 5 },   // $20,000 MXN/año
+  { name: 'Oro', min_12m_cents: 10000000, discount: 10 }    // $100,000 MXN/año
 ];
 
-// Cuentas que NO participan en el programa (decisi√≥n de Daniel 24-jul-2026):
-// socios/internos. No aparecen en /member, /redeem, /pagar ni en el √≠ndice QR.
+// Cuentas que NO participan en el programa (decisión de Daniel 24-jul-2026):
+// socios/internos. No aparecen en /member, /redeem, /pagar ni en el índice QR.
 const REWARDS_EXCLUDED_CUSTOMER_IDS = new Set([
   '4263eb3e-1448-47a6-974d-73494fe8783b'  // Pasumecha Producciones (socio)
 ]);
-// √ìrdenes que no acumulan puntos: ventas de equipo capturadas como orden.
-// El programa premia renta recurrente; una compra de equipo es transacci√≥n
-// √∫nica (reversible: quitar el n√∫mero de esta lista si Daniel decide que
-// las ventas s√≠ acumulen). Ventas futuras: capturar la l√≠nea empezando con
+// Órdenes que no acumulan puntos: ventas de equipo capturadas como orden.
+// El programa premia renta recurrente; una compra de equipo es transacción
+// única (reversible: quitar el número de esta lista si Daniel decide que
+// las ventas sí acumulen). Ventas futuras: capturar la línea empezando con
 // "VENTA" y queda excluida sola (regla en rewardsLineExcluded).
 const REWARDS_EXCLUDED_ORDER_NUMBERS = new Set([
   10261  // Blackbear 8-jul-2026: venta Ronin 2 + Ready Rig GS ProArm ($130k)
@@ -1461,14 +1464,14 @@ const REWARDS_ORIGINS = [
   'https://www.filmorent.com'
 ];
 // Rate limit simple por IP (el endpoint es publico y devuelve datos de miembro):
-// 30 requests por ventana de 5 min. En memoria ‚Äî suficiente para un solo dyno.
+// 30 requests por ventana de 5 min. En memoria — suficiente para un solo dyno.
 const rewardsRate = new Map();
 // IP aproximada del cliente, para el rate limit y el audit trail del Ledger.
-// ‚ö†Ô∏è NO ES CONFIABLE para seguridad: el portal pega directo al origin de Render
-// y cualquiera puede mandar los headers que quiera (2¬™ auditor√≠a 25-jul-2026).
+// ⚠️ NO ES CONFIABLE para seguridad: el portal pega directo al origin de Render
+// y cualquiera puede mandar los headers que quiera (2ª auditoría 25-jul-2026).
 // Por eso el candado del PIN es un tope GLOBAL con backoff, no un bloqueo por
-// IP. Aqu√≠ se prefiere el primer x-forwarded-for porque es el que trae la IP
-// p√∫blica real del cliente en el tr√°fico leg√≠timo (verificado en el Ledger).
+// IP. Aquí se prefiere el primer x-forwarded-for porque es el que trae la IP
+// pública real del cliente en el tráfico legítimo (verificado en el Ledger).
 function rewardsClientIp(req) {
   const xff = String(req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
   if (xff.length) return xff[0].slice(0, 60);
@@ -1524,7 +1527,7 @@ async function booqableGet(pathWithQuery, attempt) {
 
 // Escritura a Booqable (POST/PATCH/DELETE) con el mismo retry en 429.
 // Verificado 24-jul-2026 en orden de prueba: POST /lines con owner_id/owner_type
-// crea la l√≠nea y los totales de la orden se recalculan solos.
+// crea la línea y los totales de la orden se recalculan solos.
 async function booqableWrite(method, path, payload, attempt) {
   const r = await fetch(BOOQABLE_BASE + path, {
     method: method,
@@ -1598,10 +1601,10 @@ function rewardsLineExcluded(title) {
   const t = (title || '').toLowerCase().trim();
   if (!t) return false;
   if (REWARDS_EXCLUDE_SUBSTR.some(k => t.indexOf(k) !== -1)) return true;
-  // producto "Staff" (personal) ‚Äî match estricto para no rozar nombres de equipo
+  // producto "Staff" (personal) — match estricto para no rozar nombres de equipo
   if (t === 'staff' || t.indexOf('staff ') === 0 || t.indexOf('staff -') === 0) return true;
-  // ventas de equipo capturadas como l√≠nea libre ("VENTA - Ronin 2...") ‚Äî
-  // prefijo estricto para no rozar t√≠tulos que contengan "ventana" etc.
+  // ventas de equipo capturadas como línea libre ("VENTA - Ronin 2...") —
+  // prefijo estricto para no rozar títulos que contengan "ventana" etc.
   if (t.indexOf('venta ') === 0 || t.indexOf('venta-') === 0 || t.indexOf('venta:') === 0) return true;
   return false;
 }
@@ -1648,7 +1651,7 @@ async function rewardsComputeEarned(customerId) {
   let totalBaseCents = 0;
   let totalElsepcCents = 0;
   // revenue rodante de 12 meses (base del NIVEL): fecha de la renta
-  // (starts_at) o de creaci√≥n si no la hay
+  // (starts_at) o de creación si no la hay
   const cutoff12m = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString();
   let revenue12mCents = 0;
   const orderRows = countable.map(o => {
@@ -1697,7 +1700,14 @@ async function rewardsLedgerSummary(customerId) {
     if (!r.ok) return null;
     const j = await r.json().catch(() => null);
     if (!j || j.ok === false) return null;
-    return { redeemed_points: j.redeemed_points || 0, redemptions: j.redemptions || [] };
+    return {
+      redeemed_points: j.redeemed_points || 0,
+      redemptions: j.redemptions || [],
+      // 28-jul: órdenes de otros que este miembro pidió (suman) y órdenes propias
+      // cuyos puntos cedió a quien las pidió (restan)
+      atribuciones_ganadas: j.atribuciones_ganadas || [],
+      atribuciones_cedidas: j.atribuciones_cedidas || []
+    };
   } catch (e) {
     console.error('rewards ledger read error: ' + e.message);
     return null;
@@ -1705,8 +1715,8 @@ async function rewardsLedgerSummary(customerId) {
 }
 
 // Todo texto que acaba en una celda del Sheet: recortado y neutralizado contra
-// inyecci√≥n de f√≥rmulas (un nombre de cliente que empiece con = + - @ lo
-// interpretar√≠a Sheets como f√≥rmula). Auditor√≠a 25-jul-2026.
+// inyección de fórmulas (un nombre de cliente que empiece con = + - @ lo
+// interpretaría Sheets como fórmula). Auditoría 25-jul-2026.
 function rewardsCellSafe(v) {
   if (typeof v !== 'string') return v;
   const s = v.slice(0, 300);
@@ -1744,10 +1754,19 @@ async function rewardsBuildMember(customer) {
   const earned = await rewardsComputeEarned(customer.id);
   const ledger = await rewardsLedgerSummary(customer.id);
   const redeemed = ledger ? ledger.redeemed_points : 0;
-  const available = Math.max(0, earned.points_earned - redeemed);
+  // Atribuciones: en renta audiovisual quien ELIGE el proveedor (DP/freelance) no
+  // siempre es quien PAGA (la productora). Si pidió que los puntos fueran suyos,
+  // se los sumamos a él y se los restamos al titular de la orden. Una orden solo
+  // puede estar atribuida a una persona (el Ledger lo garantiza).
+  const ganadas = (ledger && ledger.atribuciones_ganadas) || [];
+  const cedidas = (ledger && ledger.atribuciones_cedidas) || [];
+  const puntosGanados = ganadas.reduce((s, x) => s + (Number(x.puntos) || 0), 0);
+  const puntosCedidos = cedidas.reduce((s, x) => s + (Number(x.puntos) || 0), 0);
+  const earnedTotal = Math.max(0, earned.points_earned + puntosGanados - puntosCedidos);
+  const available = Math.max(0, earnedTotal - redeemed);
   const tier = rewardsTierFor(earned.revenue_12m_cents);
-  // Ticket promedio para el cr√©dito calibrado: revenue SIN exclusiones ELSEPC
-  // (el mismo que ya calcula rewardsComputeEarned) / # de √≥rdenes contables.
+  // Ticket promedio para el crédito calibrado: revenue SIN exclusiones ELSEPC
+  // (el mismo que ya calcula rewardsComputeEarned) / # de órdenes contables.
   const countableOrders = earned.orders.length;
   const avgTicketCents = countableOrders ? Math.round(earned.revenue_cents / countableOrders) : 0;
   return {
@@ -1765,13 +1784,17 @@ async function rewardsBuildMember(customer) {
       avg_ticket_cents: avgTicketCents
     },
     points: {
-      earned: earned.points_earned,
+      earned: earnedTotal,                    // ya incluye atribuciones
+      earned_propias: earned.points_earned,   // solo sus órdenes en Booqable
+      ganados_por_atribucion: puntosGanados,  // rentas que pidió y pagó otro
+      cedidos_por_atribucion: puntosCedidos,  // rentas suyas que pidió otro
       redeemed: redeemed,
       available: available,
       revenue_cents: earned.revenue_cents,
       revenue_12m_cents: earned.revenue_12m_cents,
       elsepc_excluded_cents: earned.elsepc_excluded_cents
     },
+    atribuciones: { ganadas: ganadas, cedidas: cedidas },
     tier: {
       name: tier.name,
       discount: tier.discount,
@@ -1784,7 +1807,7 @@ async function rewardsBuildMember(customer) {
   };
 }
 
-// ‚îÄ‚îÄ GET /rewards/member?email= ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── GET /rewards/member?email= ──────────────────────────────
 app.get('/rewards/member', async (req, res) => {
   const email = String(req.query.email || '').trim().toLowerCase();
   if (!email || email.indexOf('@') === -1) {
@@ -1806,7 +1829,7 @@ app.get('/rewards/member', async (req, res) => {
   }
 });
 
-// ‚îÄ‚îÄ POST /rewards/redeem  {email, reward_id} ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── POST /rewards/redeem  {email, reward_id} ────────────────
 app.post('/rewards/redeem', async (req, res) => {
   const email = String((req.body || {}).email || '').trim().toLowerCase();
   const rewardId = parseInt((req.body || {}).reward_id, 10);
@@ -1821,9 +1844,9 @@ app.post('/rewards/redeem', async (req, res) => {
       return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
     }
 
-    // Recalcular saldo Y cat√°logo personalizado EN VIVO (no confiar en el
-    // cliente): el reward_id se valida contra el cat√°logo calibrado del propio
-    // miembro, no contra una tabla est√°tica.
+    // Recalcular saldo Y catálogo personalizado EN VIVO (no confiar en el
+    // cliente): el reward_id se valida contra el catálogo calibrado del propio
+    // miembro, no contra una tabla estática.
     const earned = await rewardsComputeEarned(customer.id);
     const ledger = await rewardsLedgerSummary(customer.id);
     if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
@@ -1832,16 +1855,20 @@ app.post('/rewards/redeem', async (req, res) => {
     const catalog = rewardsCatalogFor(avgTicketCents);
     const reward = catalog.find(r => r.id === rewardId);
     if (!reward) return res.status(400).json({ ok: false, error: 'recompensa invalida' });
-    const available = Math.max(0, earned.points_earned - ledger.redeemed_points);
+    // saldo REAL: propias + ganadas por atribución − cedidas − canjeadas
+    const available = Math.max(0, earned.points_earned
+      + ((ledger.atribuciones_ganadas || []).reduce((s, x) => s + (Number(x.puntos) || 0), 0))
+      - ((ledger.atribuciones_cedidas || []).reduce((s, x) => s + (Number(x.puntos) || 0), 0))
+      - ledger.redeemed_points);
     if (available < reward.points) {
       return res.status(409).json({ ok: false, error: 'puntos insuficientes', points_available: available });
     }
 
-    // Tope de canjes por miembro/d√≠a: el portal del cliente no tiene login
-    // (entra con su email), as√≠ que sin esto un tercero podr√≠a quemarle los
-    // puntos a un miembro creando canjes en cadena (auditor√≠a 25-jul-2026).
+    // Tope de canjes por miembro/día: el portal del cliente no tiene login
+    // (entra con su email), así que sin esto un tercero podría quemarle los
+    // puntos a un miembro creando canjes en cadena (auditoría 25-jul-2026).
     if (!rewardsRedeemAllowed(customer.id)) {
-      return res.status(429).json({ ok: false, error: 'ya hiciste varios canjes hoy; escr√≠benos por WhatsApp para ayudarte' });
+      return res.status(429).json({ ok: false, error: 'ya hiciste varios canjes hoy; escríbenos por WhatsApp para ayudarte' });
     }
 
     const credito = rewardsFormatMXN(reward.credito_cents);
@@ -1855,17 +1882,17 @@ app.post('/rewards/redeem', async (req, res) => {
       email: email,
       nombre: rewardsCleanName((customer.attributes || {}).name),
       reward_id: reward.id,
-      reward_name: reward.name,               // ej. "Cr√©dito de $700 en tu pr√≥xima renta"
+      reward_name: reward.name,               // ej. "Crédito de $700 en tu próxima renta"
       puntos: reward.points,
-      descuento_pct: 0,                       // ya no hay %: el premio es cr√©dito
-      credito_mxn: reward.credito_cents / 100, // n√∫mero en pesos (el .gs lo ignora sin romper)
+      descuento_pct: 0,                       // ya no hay %: el premio es crédito
+      credito_mxn: reward.credito_cents / 100, // número en pesos (el .gs lo ignora sin romper)
       estado: 'pendiente',
       ip: rewardsClientIp(req),
       ua: rewardsClientUa(req)
     });
     if (!wrote) return res.status(502).json({ ok: false, error: 'no se pudo registrar el canje, intenta de nuevo' });
 
-    console.log('[rewards] canje ' + folio + ' ' + email + ' -' + reward.points + ' pts (cr√©dito ' + credito + ')');
+    console.log('[rewards] canje ' + folio + ' ' + email + ' -' + reward.points + ' pts (crédito ' + credito + ')');
     return res.json({
       ok: true,
       folio: folio,
@@ -1874,8 +1901,8 @@ app.post('/rewards/redeem', async (req, res) => {
       // el Ledger esta configurado (503 arriba si no) y el .gs manda el correo
       // de confirmacion al registrar la fila del canje
       email_confirmacion: true,
-      instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu pr√≥xima renta para aplicar tu cr√©dito de ' +
-        credito + '. Aplica en rentas de al menos el doble del cr√©dito; el folio no da cambio.'
+      instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu próxima renta para aplicar tu crédito de ' +
+        credito + '. Aplica en rentas de al menos el doble del crédito; el folio no da cambio.'
     });
   } catch (e) {
     console.error('[rewards] redeem error: ' + e.message);
@@ -1883,7 +1910,7 @@ app.post('/rewards/redeem', async (req, res) => {
   }
 });
 
-// ‚îÄ‚îÄ POST /rewards/scan  {code, pin?, order_number?, staff_name?} ‚îÄ‚îÄ
+// ── POST /rewards/scan  {code, pin?, order_number?, staff_name?} ──
 // Resuelve el QR de miembro contra un indice qr->customer construido paginando
 // /customers (cache 12h; se reconstruye si el codigo no aparece).
 let rewardsQrIndex = null;       // Map code -> {id, name, email, number}
@@ -1955,7 +1982,7 @@ app.post('/rewards/scan', async (req, res) => {
       email: out.member.email,
       order_number: body.order_number || '',
       // identidad VERIFICADA (Google/PIN); nunca el staff_name que mande el
-      // navegador ‚Äî ese campo ya no es identidad (auditor√≠a 25-jul)
+      // navegador — ese campo ya no es identidad (auditoría 25-jul)
       staff_name: staffScan,
       ip: rewardsClientIp(req),
       ua: rewardsClientUa(req)
@@ -1969,14 +1996,14 @@ app.post('/rewards/scan', async (req, res) => {
   }
 });
 
-// ‚îÄ‚îÄ POST /rewards/pagar  {code|email, reward_id, order_number, staff_name?, pin?} ‚îÄ‚îÄ
+// ── POST /rewards/pagar  {code|email, reward_id, order_number, staff_name?, pin?} ──
 // "Pagar con puntos" en una escaneada (aprobado por Daniel 24-jul-2026): el staff
-// escanea el QR del miembro (o captura su email), elige el cr√©dito de su cat√°logo
+// escanea el QR del miembro (o captura su email), elige el crédito de su catálogo
 // calibrado y captura el # de orden; el server APLICA el descuento en Booqable
-// (l√≠nea negativa CON IVA ‚Äî el cliente ve el cr√©dito exacto en pesos) y registra
+// (línea negativa CON IVA — el cliente ve el crédito exacto en pesos) y registra
 // el canje ya 'aplicado' en el Ledger. El folio queda solo como registro interno.
-// Candados: PIN de staff, saldo y cat√°logo recalculados en vivo, orden ‚â• 2√ó el
-// cr√©dito, 1 cr√©dito Rewards por orden, orden cancelada rechazada.
+// Candados: PIN de staff, saldo y catálogo recalculados en vivo, orden ≥ 2× el
+// crédito, 1 crédito Rewards por orden, orden cancelada rechazada.
 app.post('/rewards/pagar', async (req, res) => {
   const body = req.body || {};
   const staffPagar = await rewardsStaffFrom(req);
@@ -2012,7 +2039,7 @@ app.post('/rewards/pagar', async (req, res) => {
     const cd = await booqableGet('/customers/' + customerId);
     const customer = cd.data;
 
-    // 2) saldo + cat√°logo calibrado EN VIVO (no confiar en el cliente)
+    // 2) saldo + catálogo calibrado EN VIVO (no confiar en el cliente)
     const earned = await rewardsComputeEarned(customerId);
     const ledger = await rewardsLedgerSummary(customerId);
     if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
@@ -2020,12 +2047,16 @@ app.post('/rewards/pagar', async (req, res) => {
     const avgTicketCents = countableOrders ? Math.round(earned.revenue_cents / countableOrders) : 0;
     const reward = rewardsCatalogFor(avgTicketCents).find(r => r.id === rewardId);
     if (!reward) return res.status(400).json({ ok: false, error: 'recompensa invalida' });
-    const available = Math.max(0, earned.points_earned - ledger.redeemed_points);
+    // saldo REAL: propias + ganadas por atribución − cedidas − canjeadas
+    const available = Math.max(0, earned.points_earned
+      + ((ledger.atribuciones_ganadas || []).reduce((s, x) => s + (Number(x.puntos) || 0), 0))
+      - ((ledger.atribuciones_cedidas || []).reduce((s, x) => s + (Number(x.puntos) || 0), 0))
+      - ledger.redeemed_points);
     if (available < reward.points) {
       return res.status(409).json({ ok: false, error: 'puntos insuficientes', points_available: available });
     }
 
-    // 3) la orden destino: existe, no cancelada, regla 2x, sin cr√©dito previo
+    // 3) la orden destino: existe, no cancelada, regla 2x, sin crédito previo
     if (REWARDS_EXCLUDED_ORDER_NUMBERS.has(orderNumber)) {
       return res.status(409).json({ ok: false, error: 'los creditos Rewards aplican solo en rentas, no en ventas de equipo' });
     }
@@ -2051,8 +2082,8 @@ app.post('/rewards/pagar', async (req, res) => {
     if (yaTiene) {
       return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene un credito Rewards aplicado' });
     }
-    // regla de Daniel 24-jul-2026: los puntos NO aplican a ventas de equipo ‚Äî
-    // si la orden trae una l√≠nea de venta (prefijo "VENTA"), se rechaza
+    // regla de Daniel 24-jul-2026: los puntos NO aplican a ventas de equipo —
+    // si la orden trae una línea de venta (prefijo "VENTA"), se rechaza
     const esVenta = lineasOrden.some(l => {
       const t = String((l.attributes || {}).title || '').toLowerCase().trim();
       return t.indexOf('venta ') === 0 || t.indexOf('venta-') === 0 || t.indexOf('venta:') === 0;
@@ -2080,7 +2111,7 @@ app.post('/rewards/pagar', async (req, res) => {
 
     // 5) registrar en el Ledger: fila de canje (manda el email al cliente) y
     //    de inmediato marcarla 'aplicado' con la orden y el staff. Si el Ledger
-    //    falla DESPU√âS de aplicar la l√≠nea, avisar para registro manual.
+    //    falla DESPUÉS de aplicar la línea, avisar para registro manual.
     const staffName = staffPagar;   // identidad verificada, no el body
     const wrote = await rewardsLedgerWrite({
       tipo: 'canje',
@@ -2134,7 +2165,187 @@ app.post('/rewards/pagar', async (req, res) => {
   }
 });
 
-// ‚îÄ‚îÄ GET /rewards/folio?f=RWD-...&pin= ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── POST /rewards/atribuir ──────────────────────────────────
+// "Los puntos de esta renta son de quien la pidió" (28-jul-2026).
+// En renta audiovisual el DP/freelance ELIGE el proveedor pero la productora PAGA:
+// si no le acreditamos los puntos a quien decide, el programa no influye la decisión.
+// La orden en Booqable NO cambia de dueño (factura y cobranza intactas); solo se le
+// pone una etiqueta `rw:<código>` para que el equipo lo vea en su propio sistema.
+//
+// Body: { order_number, code|email, canal?, pin?/id_token? } — o self-service:
+//        { order_number, email_solicitante } con la sesión del propio cliente.
+// Canales: 'mostrador' (staff autenticado), 'whatsapp' (AI/staff), 'cliente' (self-service).
+app.post('/rewards/atribuir', async (req, res) => {
+  const body = req.body || {};
+  const selfService = String(body.canal || '') === 'cliente';
+  let quienRegistra = 'cliente (self-service)';
+  if (!selfService) {
+    const staff = await rewardsStaffFrom(req);
+    if (rewardsStaffDenied(res, staff)) return;
+    quienRegistra = staff;
+  }
+  const orderNumber = parseInt(body.order_number, 10);
+  if (!Number.isFinite(orderNumber)) return res.status(400).json({ ok: false, error: 'order_number invalido' });
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'atribuciones deshabilitadas (Ledger no configurado)' });
+
+  try {
+    // 1) el beneficiario: por QR (mostrador) o por email (self-service / WhatsApp)
+    let beneficiario = null;
+    const code = String(body.code || '').trim().toUpperCase();
+    const email = String(body.email || '').trim().toLowerCase();
+    if (code) {
+      const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
+      if (stale) await rewardsBuildQrIndex();
+      let hit = rewardsQrIndex.get(code);
+      if (!hit && !stale) { await rewardsBuildQrIndex(); hit = rewardsQrIndex.get(code); }
+      if (rewardsQrAmbiguous[code]) return res.status(409).json({ ok: false, error: 'codigo ambiguo, usa el email' });
+      if (!hit) return res.status(404).json({ ok: false, error: 'codigo no encontrado' });
+      const cd = await booqableGet('/customers/' + hit.id);
+      beneficiario = cd.data;
+    } else if (email && email.indexOf('@') !== -1) {
+      beneficiario = await rewardsFindCustomer(email);
+      if (!beneficiario) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
+    } else {
+      return res.status(400).json({ ok: false, error: 'manda el code (QR) o el email de quien acumula' });
+    }
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(beneficiario.id)) {
+      return res.status(403).json({ ok: false, error: 'esa cuenta no participa en Filmorent Rewards' });
+    }
+
+    // 2) la orden: debe existir, no estar cancelada ni ser venta de equipo
+    if (REWARDS_EXCLUDED_ORDER_NUMBERS.has(orderNumber)) {
+      return res.status(409).json({ ok: false, error: 'las ventas de equipo no acumulan puntos' });
+    }
+    const od = await booqableGet('/orders?filter[number]=' + orderNumber + '&page[size]=2');
+    const order = (od.data || [])[0];
+    if (!order) return res.status(404).json({ ok: false, error: 'no existe la orden #' + orderNumber });
+    const oa = order.attributes || {};
+    if (oa.status === 'canceled' || oa.status === 'draft' || oa.status === 'concept') {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' no cuenta para puntos (' + oa.status + ')' });
+    }
+    if (String(oa.customer_id) === String(beneficiario.id)) {
+      return res.status(409).json({ ok: false, error: 'esa orden ya es de esa cuenta: los puntos le llegan solos' });
+    }
+    // Self-service: solo rentas recientes (evita que alguien reclame el histórico ajeno)
+    const dias = (Date.now() - new Date(oa.starts_at || oa.created_at).getTime()) / 86400000;
+    if (selfService && dias > REWARDS_ATRIB_DIAS) {
+      return res.status(409).json({ ok: false, error: 'esa renta tiene más de ' + REWARDS_ATRIB_DIAS + ' días; pídelo en el mostrador' });
+    }
+
+    // 3) puntos de esa orden (misma regla de siempre: base sin IVA, sin líneas excluidas)
+    const gt = oa.grand_total_in_cents || 0;
+    const gtt = oa.grand_total_with_tax_in_cents || 0;
+    let excl = 0;
+    try {
+      const ld = await booqableGet('/lines?filter[order_id]=' + order.id + '&page[size]=100');
+      const ratio = gtt ? (gt / gtt) : 1;
+      for (const l of (ld.data || [])) {
+        const la = l.attributes || {};
+        if (la.archived || !rewardsLineExcluded(la.title)) continue;
+        excl += Math.round((la.price_in_cents || 0) * ratio);
+      }
+    } catch (e2) { /* si falla, se atribuye el total */ }
+    const baseCents = Math.max(0, gt - excl);
+    const puntos = Math.floor(baseCents / 100 / 100);
+    if (puntos <= 0) return res.status(409).json({ ok: false, error: 'esa orden no genera puntos' });
+
+    // 4) titular actual (para el registro y para restarle los puntos)
+    let titularNombre = '';
+    try {
+      const td = await booqableGet('/customers/' + oa.customer_id);
+      titularNombre = rewardsCleanName((td.data.attributes || {}).name);
+    } catch (e3) { /* informativo */ }
+
+    // 5) registrar en el Ledger (rechaza si la orden ya tiene dueño de puntos)
+    const wrote = await fetch(REWARDS_SHEETS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tipo: 'atribucion',
+        fecha: new Date().toISOString(),
+        order_number: String(orderNumber),
+        order_id: order.id,
+        titular_id: oa.customer_id,
+        titular_nombre: rewardsCellSafe(titularNombre),
+        beneficiario_id: beneficiario.id,
+        beneficiario_nombre: rewardsCellSafe(rewardsCleanName((beneficiario.attributes || {}).name)),
+        beneficiario_email: (beneficiario.attributes || {}).email || '',
+        monto_mxn: baseCents / 100,
+        puntos: puntos,
+        canal: body.canal || 'mostrador',
+        registrado_por: rewardsCellSafe(quienRegistra),
+        notas: rewardsCellSafe(String(body.notas || '')),
+        ip: rewardsClientIp(req),
+        ua: rewardsClientUa(req)
+      }),
+      redirect: 'follow'
+    }).then(r => r.json()).catch(() => null);
+
+    if (!wrote) return res.status(502).json({ ok: false, error: 'no se pudo registrar, intenta de nuevo' });
+    if (wrote.ok === false) {
+      return res.status(409).json({
+        ok: false,
+        error: wrote.error === 'orden ya atribuida'
+          ? 'los puntos de la orden #' + orderNumber + ' ya son de ' + (wrote.beneficiario || 'otra cuenta')
+          : (wrote.error || 'no se pudo registrar'),
+        beneficiario: wrote.beneficiario, registrado_por: wrote.registrado_por, fecha: wrote.fecha
+      });
+    }
+
+    // 6) espejo visible en Booqable: etiqueta en la orden (no cambia titular ni factura)
+    let etiquetada = false;
+    try {
+      const tags = Array.isArray(oa.tag_list) ? oa.tag_list.slice() : [];
+      const etiqueta = 'rw:' + rewardsQrCode(beneficiario.id);
+      if (tags.indexOf(etiqueta) === -1) tags.push(etiqueta);
+      await booqableWrite('PATCH', '/orders/' + order.id, {
+        data: { id: order.id, type: 'orders', attributes: { tag_list: tags } }
+      });
+      etiquetada = true;
+    } catch (e4) {
+      console.error('[rewards] no se pudo etiquetar la orden ' + orderNumber + ': ' + e4.message);
+    }
+
+    console.log('[rewards] atribucion orden ' + orderNumber + ' (' + puntos + ' pts) -> ' +
+      rewardsCleanName((beneficiario.attributes || {}).name) + ' | canal ' + (body.canal || 'mostrador') +
+      ' | por ' + quienRegistra + (etiquetada ? '' : ' | SIN etiqueta en Booqable'));
+
+    return res.json({
+      ok: true,
+      order_number: orderNumber,
+      puntos: puntos,
+      beneficiario: rewardsCleanName((beneficiario.attributes || {}).name),
+      beneficiario_email: (beneficiario.attributes || {}).email || '',
+      titular: titularNombre,
+      etiquetada_en_booqable: etiquetada,
+      registrado_por: quienRegistra
+    });
+  } catch (e) {
+    console.error('[rewards] atribuir error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error registrando la atribucion, intenta de nuevo' });
+  }
+});
+
+// ── GET /rewards/atribucion?n=1234 ──────────────────────────
+// ¿esta orden ya tiene dueño de puntos? Lo consulta el mostrador antes de atribuir,
+// para no discutir a ciegas cuando un cliente reclama.
+app.get('/rewards/atribucion', async (req, res) => {
+  const staff = await rewardsStaffFrom(req);
+  if (rewardsStaffDenied(res, staff)) return;
+  const n = parseInt(req.query.n, 10);
+  if (!Number.isFinite(n)) return res.status(400).json({ ok: false, error: 'falta n (numero de orden)' });
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'atribuciones deshabilitadas' });
+  try {
+    const r = await fetch(REWARDS_SHEETS_URL + '?action=atribucion&order_number=' + n, { redirect: 'follow' });
+    const j = await r.json().catch(() => null);
+    if (!j) return res.status(502).json({ ok: false, error: 'no se pudo leer el Ledger' });
+    return res.json(j);
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: 'error consultando la atribucion' });
+  }
+});
+
+// ── GET /rewards/folio?f=RWD-...&pin= ───────────────────────
 // Para staff (F1.5): consulta el estado de un folio de canje en el Ledger
 // (Apps Script doGet action=folio). No toca Booqable. El .gs responde
 // {ok, found, folio:{folio,fecha,customer_id,email,nombre,reward,points,
@@ -2161,7 +2372,7 @@ app.get('/rewards/folio', async (req, res) => {
   }
 });
 
-// ‚îÄ‚îÄ POST /rewards/folio/aplicar  {folio, order_number, staff_name?, pin?} ‚îÄ‚îÄ
+// ── POST /rewards/folio/aplicar  {folio, order_number, staff_name?, pin?} ──
 // Para staff (F1.5): marca un folio de canje como aplicado a una orden.
 // POST al Apps Script {tipo:'aplicar', folio, order_number, staff_name};
 // el .gs responde {ok, updated:bool, estado_previo}.
