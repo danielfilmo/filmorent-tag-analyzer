@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.8', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2424,9 +2424,248 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
 });
 
 
+// =====================================================================
+// v8.9: BORRADOR DE ORDEN desde la conversacion (copiloto del equipo)
+// POST /webhook/draft-order  body: { contactId }
+// Disparado por un Shortcut en Respond.io. Lee la conversacion, extrae
+// con Claude el equipo y las fechas, crea una orden BORRADOR en Booqable
+// (status draft — nada le llega al cliente) y deja un comentario interno
+// en la conversacion con el numero de orden y lo que falto por matchear.
+// Seguridad: si DRAFT_ORDER_TOKEN esta seteada, exige header x-draft-token.
+// =====================================================================
+
+const DRAFT_ORDER_TOKEN = process.env.DRAFT_ORDER_TOKEN || '';
+
+async function draftRespondioGet(path) {
+  const r = await fetch('https://api.respond.io/v2' + path, {
+    headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' }
+  });
+  if (!r.ok) throw new Error('Respond.io ' + r.status + ' en ' + path);
+  return r.json();
+}
+
+async function draftPostComment(contactId, text) {
+  try {
+    const r = await fetch('https://api.respond.io/v2/contact/id:' + contactId + '/comment', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: String(text).slice(0, 990) })
+    });
+    if (!r.ok) console.error('[draft-order] comentario fallo: ' + r.status + ' - ' + (await r.text()));
+    return r.ok;
+  } catch (e) {
+    console.error('[draft-order] comentario error: ' + e.message);
+    return false;
+  }
+}
+
+// Busca un product group por texto y regresa {groupName, productId} o null.
+// Intenta el query completo y luego versiones mas cortas (marca/modelo).
+async function draftFindProduct(query) {
+  const tries = [query];
+  const words = String(query).split(/\s+/).filter(function (w) { return w.length > 2; });
+  if (words.length > 2) tries.push(words.slice(0, 2).join(' '));
+  if (words.length > 1) tries.push(words[words.length - 1]);
+  for (const q of tries) {
+    let d;
+    try {
+      d = await booqableGet('/product_groups?filter[q]=' + encodeURIComponent(q) + '&page[size]=5');
+    } catch (e) { continue; }
+    const g = (d.data || []).find(function (x) { return x.attributes && !x.attributes.archived; });
+    if (!g) continue;
+    try {
+      const pd = await booqableGet('/products?filter[product_group_id]=' + g.id + '&page[size]=1');
+      const p = (pd.data || [])[0];
+      if (p) return { groupName: g.attributes.name, productId: p.id };
+    } catch (e) { /* siguiente intento */ }
+  }
+  return null;
+}
+
+app.post('/webhook/draft-order', async (req, res) => {
+  try {
+    if (DRAFT_ORDER_TOKEN && (req.headers['x-draft-token'] || '') !== DRAFT_ORDER_TOKEN) {
+      return res.status(401).json({ ok: false, error: 'token invalido' });
+    }
+    if (!BOOQABLE_API_KEY) {
+      return res.status(500).json({ ok: false, error: 'BOOQABLE_API_KEY no configurada' });
+    }
+    const contactId = extractContactId(req.body);
+    if (!contactId) return res.status(400).json({ ok: false, error: 'falta contactId' });
+
+    console.log('[draft-order] solicitud para contacto ' + contactId);
+
+    // 1) Contacto + mensajes recientes
+    const [contact, messagesData] = await Promise.all([
+      draftRespondioGet('/contact/id:' + contactId),
+      draftRespondioGet('/contact/id:' + contactId + '/message/list?limit=60')
+    ]);
+    const msgs = (messagesData.items || messagesData.data || []).slice().reverse(); // cronologico
+    const transcript = msgs.map(function (m) {
+      const who = m.traffic === 'incoming' ? 'CLIENTE' : 'FILMORENT';
+      let t = m.message && m.message.text;
+      if (!t) t = '[' + ((m.message && m.message.type) || 'adjunto') + ']';
+      return who + ': ' + String(t).replace(/\s+/g, ' ').slice(0, 300);
+    }).join('\n').slice(-8000);
+
+    if (!transcript) {
+      return res.status(422).json({ ok: false, error: 'conversacion vacia' });
+    }
+
+    const nombreContacto = (((contact.firstName || '') + ' ' + (contact.lastName || '')).trim()) || null;
+    const phone = String(contact.phone || '').replace(/[^0-9]/g, '');
+
+    // 2) Claude extrae equipo y fechas
+    const hoyMty = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
+    const extractPrompt = 'Eres el asistente interno de Filmorent (renta de equipo audiovisual en Monterrey). ' +
+      'Lee esta conversacion de WhatsApp y extrae SOLO lo necesario para armar un BORRADOR de orden de renta.\n\n' +
+      'HOY es ' + hoyMty + ' (zona America/Monterrey).\n\n' +
+      'CONVERSACION (CLIENTE = el cliente, FILMORENT = nuestro equipo o el bot):\n' + transcript + '\n\n' +
+      'Regresa UNICAMENTE un objeto JSON valido, sin markdown ni texto extra:\n' +
+      '{"equipos":[{"descripcion":"equipo tal como lo pidio, ej: Sony FX3, DJI Mini 4 Pro, luz Amaran 200x","cantidad":1}],' +
+      '"fecha_inicio":"YYYY-MM-DD o null","fecha_fin":"YYYY-MM-DD o null",' +
+      '"notas":"detalles utiles para el equipo (horarios, entrega, proyecto, dudas abiertas); breve",' +
+      '"confianza":"alta|media|baja"}\n\n' +
+      'Reglas: incluye SOLO equipo que el cliente quiere rentar en su solicitud MAS RECIENTE ' +
+      '(no lo que pregunto hace semanas y descarto, no lo que solo pregunto por precio y dijo que no). ' +
+      'Si dice fechas relativas ("este viernes", "el fin"), calculalas con la fecha de HOY. ' +
+      'Si no hay fechas claras usa null. cantidad default 1. Si no pide nada rentable, equipos = [].';
+
+    const extractResp = await anthropic.messages.create({
+      model: 'claude-sonnet-5',
+      max_tokens: 700,
+      messages: [{ role: 'user', content: extractPrompt }]
+    });
+    let ext = null;
+    try {
+      const raw = claudeText(extractResp);
+      ext = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+    } catch (e) {
+      console.error('[draft-order] JSON de Claude ilegible');
+      return res.status(422).json({ ok: false, error: 'no se pudo extraer datos de la conversacion' });
+    }
+    const equipos = Array.isArray(ext.equipos)
+      ? ext.equipos.filter(function (x) { return x && x.descripcion; })
+      : [];
+    if (!equipos.length) {
+      await draftPostComment(contactId,
+        '🤖 Borrador de orden: no encontre en la conversacion un equipo claro que el cliente quiera rentar. ' +
+        'Crea la orden a mano en Booqable.');
+      return res.json({ ok: false, error: 'sin equipos detectados' });
+    }
+
+    // 3) Fechas (si no hay, manana 9am-7pm y se avisa en el comentario)
+    let fi = ext.fecha_inicio || null;
+    let ff = ext.fecha_fin || null;
+    let fechasAsumidas = false;
+    if (!fi || !/^\d{4}-\d{2}-\d{2}$/.test(fi)) {
+      fi = new Date(Date.now() + 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
+      fechasAsumidas = true;
+    }
+    if (!ff || !/^\d{4}-\d{2}-\d{2}$/.test(ff) || ff < fi) ff = fi;
+    const startsAt = fi + 'T09:00:00-06:00';
+    const stopsAt = ff + 'T19:00:00-06:00';
+
+    // 4) Cliente en Booqable (por telefono; si no, por nombre)
+    let customerId = null;
+    let customerName = null;
+    const searchTerms = [];
+    if (phone.length >= 10) searchTerms.push(phone.slice(-10));
+    if (nombreContacto) searchTerms.push(nombreContacto);
+    for (const term of searchTerms) {
+      if (customerId) break;
+      try {
+        const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(term) + '&page[size]=1');
+        const c = (cd.data || [])[0];
+        if (c) { customerId = c.id; customerName = c.attributes && c.attributes.name; }
+      } catch (e) { /* siguiente termino */ }
+    }
+
+    // 5) Crear la orden y agregar productos
+    const od = await booqableWrite('POST', '/orders', {
+      data: { type: 'orders', attributes: { starts_at: startsAt, stops_at: stopsAt } }
+    });
+    const orderId = od.data.id;
+
+    const agregados = [];
+    const noEncontrados = [];
+    for (const eq of equipos.slice(0, 12)) {
+      const qty = Math.max(1, parseInt(eq.cantidad, 10) || 1);
+      const hit = await draftFindProduct(eq.descripcion);
+      if (!hit) { noEncontrados.push(eq.descripcion); continue; }
+      try {
+        await booqableWrite('POST', '/order_fulfillments', {
+          data: {
+            type: 'order_fulfillments',
+            attributes: {
+              order_id: orderId,
+              actions: [{ action: 'book_product', mode: 'create_new', product_id: hit.productId, quantity: qty }]
+            }
+          }
+        });
+        agregados.push(hit.groupName + (qty > 1 ? ' x' + qty : ''));
+      } catch (e) {
+        console.error('[draft-order] book ' + hit.groupName + ': ' + e.message);
+        noEncontrados.push(eq.descripcion);
+      }
+    }
+
+    // 6) Cliente + tag, y transicion a draft (le da numero y lo hace visible)
+    const patchAttrs = { tag_list: ['borrador-ai'] };
+    if (customerId) patchAttrs.customer_id = customerId;
+    try {
+      await booqableWrite('PATCH', '/orders/' + orderId, {
+        data: { type: 'orders', id: orderId, attributes: patchAttrs }
+      });
+    } catch (e) { console.error('[draft-order] patch cliente/tag: ' + e.message); }
+
+    let orderNumber = null;
+    try {
+      await booqableWrite('POST', '/order_status_transitions', {
+        data: {
+          type: 'order_status_transitions',
+          attributes: { order_id: orderId, transition_from: 'new', transition_to: 'draft' }
+        }
+      });
+      const chk = await booqableGet('/orders/' + orderId);
+      orderNumber = chk.data.attributes.number;
+    } catch (e) { console.error('[draft-order] transicion a draft: ' + e.message); }
+
+    // 7) Comentario interno con el resumen
+    const orderUrl = 'https://filmorent-sa-de-cv.booqable.com/orders/' + orderId;
+    const lineas = [];
+    lineas.push('🤖 BORRADOR ' + (orderNumber ? '#' + orderNumber : '(sin numero)') +
+      ' creado en Booqable. NADA se envio al cliente.');
+    lineas.push('Cliente: ' + (customerName ||
+      ((nombreContacto || 'sin nombre') + ' — NO esta en Booqable, asignar a mano')));
+    lineas.push('Fechas: ' + fi + ' a ' + ff + (fechasAsumidas ? ' (ASUMIDAS, no habia fechas claras)' : ''));
+    if (agregados.length) lineas.push('Equipo: ' + agregados.join(', '));
+    if (noEncontrados.length) lineas.push('⚠️ NO encontre en catalogo: ' + noEncontrados.join(', ') + ' — agregar a mano');
+    if (ext.notas) lineas.push('Notas: ' + String(ext.notas).slice(0, 200));
+    lineas.push('Revisar fechas/precios/cliente y enviar desde Booqable: ' + orderUrl);
+    await draftPostComment(contactId, lineas.join('\n'));
+
+    console.log('[draft-order] orden ' + (orderNumber || orderId) + ' creada para contacto ' + contactId);
+    return res.json({
+      ok: true,
+      order_id: orderId,
+      number: orderNumber,
+      agregados: agregados,
+      no_encontrados: noEncontrados,
+      fechas: { inicio: fi, fin: ff, asumidas: fechasAsumidas },
+      cliente: customerName || null
+    });
+  } catch (e) {
+    console.error('[draft-order] error: ' + (e && e.message));
+    return res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 300) });
+  }
+});
+
+
 app.listen(PORT, () => {
   console.log('Filmorent Tag Analyzer v7.2.1 running on port ' + PORT);
   console.log('Whisper transcription: ' + (openai ? 'ENABLED' : 'DISABLED (set OPENAI_API_KEY to enable)'));
   console.log('Auto-summary on conversation opened: ENABLED');
+  console.log('Draft-order copilot (/webhook/draft-order): ' + (BOOQABLE_API_KEY ? 'ENABLED' : 'DISABLED (set BOOQABLE_API_KEY)'));
   console.log('Rewards endpoints (/rewards/*): ' + (BOOQABLE_API_KEY ? 'ENABLED' : 'DISABLED (set BOOQABLE_API_KEY)') + (REWARDS_SHEETS_URL ? ', ledger ON' : ', ledger OFF'));
 });
