@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2465,7 +2465,7 @@ async function draftFindProduct(query) {
   const tries = [query];
   const words = String(query).split(/\s+/).filter(function (w) { return w.length > 2; });
   if (words.length > 2) tries.push(words.slice(0, 2).join(' '));
-  if (words.length > 1) tries.push(words[words.length - 1]);
+  // Sin fallback de una sola palabra: "Pro" o "Mini" matchearian cualquier cosa.
   for (const q of tries) {
     let d;
     try {
@@ -2491,7 +2491,9 @@ app.post('/webhook/draft-order', async (req, res) => {
       return res.status(500).json({ ok: false, error: 'BOOQABLE_API_KEY no configurada' });
     }
     const contactId = extractContactId(req.body);
-    if (!contactId) return res.status(400).json({ ok: false, error: 'falta contactId' });
+    if (!contactId || !/^\d+$/.test(String(contactId))) {
+      return res.status(400).json({ ok: false, error: 'contactId faltante o invalido' });
+    }
 
     console.log('[draft-order] solicitud para contacto ' + contactId);
 
@@ -2533,7 +2535,7 @@ app.post('/webhook/draft-order', async (req, res) => {
 
     const extractResp = await anthropic.messages.create({
       model: 'claude-sonnet-5',
-      max_tokens: 700,
+      max_tokens: 4000,
       messages: [{ role: 'user', content: extractPrompt }]
     });
     let ext = null;
@@ -2544,9 +2546,11 @@ app.post('/webhook/draft-order', async (req, res) => {
       console.error('[draft-order] JSON de Claude ilegible');
       return res.status(422).json({ ok: false, error: 'no se pudo extraer datos de la conversacion' });
     }
-    const equipos = Array.isArray(ext.equipos)
-      ? ext.equipos.filter(function (x) { return x && x.descripcion; })
-      : [];
+    if (!ext || !Array.isArray(ext.equipos)) {
+      console.error('[draft-order] extraccion sin campo equipos');
+      return res.status(422).json({ ok: false, error: 'extraccion incompleta, reintenta' });
+    }
+    const equipos = ext.equipos.filter(function (x) { return x && x.descripcion; });
     if (!equipos.length) {
       await draftPostComment(contactId,
         '🤖 Borrador de orden: no encontre en la conversacion un equipo claro que el cliente quiera rentar. ' +
@@ -2566,19 +2570,38 @@ app.post('/webhook/draft-order', async (req, res) => {
     const startsAt = fi + 'T09:00:00-06:00';
     const stopsAt = ff + 'T19:00:00-06:00';
 
-    // 4) Cliente en Booqable (por telefono; si no, por nombre)
+    // 4) Cliente en Booqable — se asigna SOLO con telefono VERIFICADO.
+    // filter[q] por nombre es demasiado difuso (regresa homonimos y hasta
+    // nombres distintos), asi que el nombre nunca asigna: solo sugiere.
+    const soloDigitos = function (s) { return String(s || '').replace(/[^0-9]/g, ''); };
     let customerId = null;
     let customerName = null;
-    const searchTerms = [];
-    if (phone.length >= 10) searchTerms.push(phone.slice(-10));
-    if (nombreContacto) searchTerms.push(nombreContacto);
-    for (const term of searchTerms) {
-      if (customerId) break;
+    let clienteSugerido = null;
+    let telDuplicados = 0;
+    const phone10 = phone.slice(-10);
+    if (phone10.length === 10) {
       try {
-        const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(term) + '&page[size]=1');
+        const cd = await booqableGet('/customers?filter[q]=' + phone10 + '&page[size]=5');
+        const verificados = (cd.data || []).filter(function (c) {
+          const p = (c.attributes && c.attributes.properties) || {};
+          return [p.phone, p.phone_2].some(function (t) {
+            const d = soloDigitos(t);
+            return d && d.endsWith(phone10);
+          });
+        });
+        if (verificados.length) {
+          customerId = verificados[0].id;
+          customerName = verificados[0].attributes.name;
+          telDuplicados = verificados.length - 1;
+        }
+      } catch (e) { /* queda sin cliente */ }
+    }
+    if (!customerId && nombreContacto) {
+      try {
+        const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(nombreContacto) + '&page[size]=1');
         const c = (cd.data || [])[0];
-        if (c) { customerId = c.id; customerName = c.attributes && c.attributes.name; }
-      } catch (e) { /* siguiente termino */ }
+        if (c) clienteSugerido = c.attributes && c.attributes.name;
+      } catch (e) { /* sin sugerencia */ }
     }
 
     // 5) Crear la orden y agregar productos
@@ -2589,6 +2612,8 @@ app.post('/webhook/draft-order', async (req, res) => {
 
     const agregados = [];
     const noEncontrados = [];
+    const fallaronReserva = [];
+    const omitidos = Math.max(0, equipos.length - 12);
     for (const eq of equipos.slice(0, 12)) {
       const qty = Math.max(1, parseInt(eq.cantidad, 10) || 1);
       const hit = await draftFindProduct(eq.descripcion);
@@ -2603,21 +2628,25 @@ app.post('/webhook/draft-order', async (req, res) => {
             }
           }
         });
-        agregados.push(hit.groupName + (qty > 1 ? ' x' + qty : ''));
+        agregados.push(eq.descripcion + ' -> ' + hit.groupName + (qty > 1 ? ' x' + qty : ''));
       } catch (e) {
         console.error('[draft-order] book ' + hit.groupName + ': ' + e.message);
-        noEncontrados.push(eq.descripcion);
+        fallaronReserva.push(eq.descripcion + ' (' + hit.groupName + ')');
       }
     }
 
     // 6) Cliente + tag, y transicion a draft (le da numero y lo hace visible)
     const patchAttrs = { tag_list: ['borrador-ai'] };
     if (customerId) patchAttrs.customer_id = customerId;
+    let patchFallo = false;
     try {
       await booqableWrite('PATCH', '/orders/' + orderId, {
         data: { type: 'orders', id: orderId, attributes: patchAttrs }
       });
-    } catch (e) { console.error('[draft-order] patch cliente/tag: ' + e.message); }
+    } catch (e) {
+      patchFallo = true;
+      console.error('[draft-order] patch cliente/tag: ' + e.message);
+    }
 
     let orderNumber = null;
     try {
@@ -2636,13 +2665,28 @@ app.post('/webhook/draft-order', async (req, res) => {
     const lineas = [];
     lineas.push('🤖 BORRADOR ' + (orderNumber ? '#' + orderNumber : '(sin numero)') +
       ' creado en Booqable. NADA se envio al cliente.');
-    lineas.push('Cliente: ' + (customerName ||
-      ((nombreContacto || 'sin nombre') + ' — NO esta en Booqable, asignar a mano')));
+    lineas.push(orderUrl);
+    if (customerName && !patchFallo) {
+      lineas.push('Cliente: ' + customerName + ' (match por telefono' +
+        (telDuplicados ? '; OJO: hay ' + (telDuplicados + 1) + ' clientes con este tel, revisa' : '') + ')');
+    } else if (customerName && patchFallo) {
+      lineas.push('⚠️ Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
+        customerName + '" — asignalo a mano (y ponle el tag borrador-ai).');
+    } else {
+      lineas.push('Cliente: SIN ASIGNAR (no hubo match seguro por telefono). ' +
+        (clienteSugerido
+          ? 'Parecido en Booqable: "' + clienteSugerido + '" — verificalo y asignalo tu.'
+          : (nombreContacto
+            ? 'En WhatsApp se llama "' + nombreContacto + '" — buscalo o crealo en Booqable.'
+            : 'Contacto sin nombre en WhatsApp.')));
+    }
     lineas.push('Fechas: ' + fi + ' a ' + ff + (fechasAsumidas ? ' (ASUMIDAS, no habia fechas claras)' : ''));
-    if (agregados.length) lineas.push('Equipo: ' + agregados.join(', '));
+    if (agregados.length) lineas.push('Equipo: ' + agregados.join(' | '));
     if (noEncontrados.length) lineas.push('⚠️ NO encontre en catalogo: ' + noEncontrados.join(', ') + ' — agregar a mano');
-    if (ext.notas) lineas.push('Notas: ' + String(ext.notas).slice(0, 200));
-    lineas.push('Revisar fechas/precios/cliente y enviar desde Booqable: ' + orderUrl);
+    if (fallaronReserva.length) lineas.push('⚠️ Encontrados pero NO agregados (fallo la reserva): ' + fallaronReserva.join(', ') + ' — agregalos a mano');
+    if (omitidos > 0) lineas.push('⚠️ El cliente menciono ' + equipos.length + ' equipos; solo procese los primeros 12.');
+    if (ext.notas) lineas.push('Notas: ' + String(ext.notas).slice(0, 180));
+    lineas.push('Revisa fechas/precios/cliente y envia desde Booqable.');
     await draftPostComment(contactId, lineas.join('\n'));
 
     console.log('[draft-order] orden ' + (orderNumber || orderId) + ' creada para contacto ' + contactId);
@@ -2652,8 +2696,11 @@ app.post('/webhook/draft-order', async (req, res) => {
       number: orderNumber,
       agregados: agregados,
       no_encontrados: noEncontrados,
+      fallaron_reserva: fallaronReserva,
+      omitidos: omitidos,
       fechas: { inicio: fi, fin: ff, asumidas: fechasAsumidas },
-      cliente: customerName || null
+      cliente: customerName || null,
+      cliente_sugerido: clienteSugerido
     });
   } catch (e) {
     console.error('[draft-order] error: ' + (e && e.message));
@@ -2666,6 +2713,6 @@ app.listen(PORT, () => {
   console.log('Filmorent Tag Analyzer v7.2.1 running on port ' + PORT);
   console.log('Whisper transcription: ' + (openai ? 'ENABLED' : 'DISABLED (set OPENAI_API_KEY to enable)'));
   console.log('Auto-summary on conversation opened: ENABLED');
-  console.log('Draft-order copilot (/webhook/draft-order): ' + (BOOQABLE_API_KEY ? 'ENABLED' : 'DISABLED (set BOOQABLE_API_KEY)'));
+  console.log('Draft-order copilot (/webhook/draft-order): ' + (BOOQABLE_API_KEY ? ('ENABLED, token ' + (DRAFT_ORDER_TOKEN ? 'ON' : 'OFF')) : 'DISABLED (set BOOQABLE_API_KEY)'));
   console.log('Rewards endpoints (/rewards/*): ' + (BOOQABLE_API_KEY ? 'ENABLED' : 'DISABLED (set BOOQABLE_API_KEY)') + (REWARDS_SHEETS_URL ? ', ledger ON' : ', ledger OFF'));
 });
