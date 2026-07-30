@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.3', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2460,19 +2460,39 @@ async function draftPostComment(contactId, text) {
 }
 
 // Busca un product group por texto y regresa {groupName, productId} o null.
-// Intenta el query completo y luego versiones mas cortas (marca/modelo).
+// Solo acepta candidatos cuyo nombre contenga TODAS las palabras del query
+// como PALABRA COMPLETA: "grand" no acepta "Grande", "fx3" no acepta "FX30".
+// (filter[q] de Booqable es difuso: para "filmo grand" regresa "Boom Pole
+// Grande" primero.) Sin match confiable regresa null: mejor "agregar a mano"
+// que adivinar un producto equivocado.
 async function draftFindProduct(query) {
-  const tries = [query];
-  const words = String(query).split(/\s+/).filter(function (w) { return w.length > 2; });
-  if (words.length > 2) tries.push(words.slice(0, 2).join(' '));
-  // Sin fallback de una sola palabra: "Pro" o "Mini" matchearian cualquier cosa.
-  for (const q of tries) {
+  const norm = function (s) {
+    return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  };
+  const contienePalabra = function (texto, w) {
+    const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('(^|[^a-z0-9])' + esc + '($|[^a-z0-9])').test(texto);
+  };
+  const genericas = ['luz', 'luces', 'lampara', 'camara', 'lente', 'equipo', 'kit', 'de', 'para', 'con', 'el', 'la', 'un', 'una'];
+  const words = norm(query).split(/\s+/).filter(function (w) { return w.length > 1; });
+  const significativas = words.filter(function (w) { return genericas.indexOf(w) === -1; });
+  const intentos = [words];
+  if (significativas.length && significativas.length < words.length) intentos.push(significativas);
+  for (const setPalabras of intentos) {
     let d;
     try {
-      d = await booqableGet('/product_groups?filter[q]=' + encodeURIComponent(q) + '&page[size]=5');
+      d = await booqableGet('/product_groups?filter[q]=' + encodeURIComponent(setPalabras.join(' ')) + '&page[size]=10');
     } catch (e) { continue; }
-    const g = (d.data || []).find(function (x) { return x.attributes && !x.attributes.archived; });
-    if (!g) continue;
+    const exactos = (d.data || []).filter(function (x) {
+      if (!x.attributes || x.attributes.archived) return false;
+      const n = norm(x.attributes.name);
+      return setPalabras.every(function (w) { return contienePalabra(n, w); });
+    });
+    if (!exactos.length) continue;
+    // Desempate: el nombre mas corto es el mas especifico al query
+    // ("Estudio Filmo Grand" le gana a "Hora extra estudio Filmo Grand").
+    exactos.sort(function (a, b) { return a.attributes.name.length - b.attributes.name.length; });
+    const g = exactos[0];
     try {
       const pd = await booqableGet('/products?filter[product_group_id]=' + g.id + '&page[size]=1');
       const p = (pd.data || [])[0];
