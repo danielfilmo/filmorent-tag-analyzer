@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2577,7 +2577,7 @@ app.post('/webhook/draft-order', async (req, res) => {
     let customerId = null;
     let customerName = null;
     let clienteSugerido = null;
-    let telDuplicados = 0;
+    let clientesEmpatados = [];
     const phone10 = phone.slice(-10);
     if (phone10.length === 10) {
       try {
@@ -2589,14 +2589,18 @@ app.post('/webhook/draft-order', async (req, res) => {
             return d && d.endsWith(phone10);
           });
         });
-        if (verificados.length) {
+        if (verificados.length === 1) {
           customerId = verificados[0].id;
           customerName = verificados[0].attributes.name;
-          telDuplicados = verificados.length - 1;
+        } else if (verificados.length > 1) {
+          // Mismo telefono con 2+ clientes (tipico: persona fisica + su
+          // empresa, o freelance). NO se adivina: el equipo elige, o lo
+          // corrobora con el cliente por WhatsApp.
+          clientesEmpatados = verificados.map(function (c) { return c.attributes.name; });
         }
       } catch (e) { /* queda sin cliente */ }
     }
-    if (!customerId && nombreContacto) {
+    if (!customerId && !clientesEmpatados.length && nombreContacto) {
       try {
         const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(nombreContacto) + '&page[size]=1');
         const c = (cd.data || [])[0];
@@ -2667,11 +2671,14 @@ app.post('/webhook/draft-order', async (req, res) => {
       ' creado en Booqable. NADA se envio al cliente.');
     lineas.push(orderUrl);
     if (customerName && !patchFallo) {
-      lineas.push('Cliente: ' + customerName + ' (match por telefono' +
-        (telDuplicados ? '; OJO: hay ' + (telDuplicados + 1) + ' clientes con este tel, revisa' : '') + ')');
+      lineas.push('Cliente: ' + customerName + ' (match por telefono). Confirma que la renta va a ESTE cliente antes de enviar.');
     } else if (customerName && patchFallo) {
       lineas.push('⚠️ Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
         customerName + '" — asignalo a mano (y ponle el tag borrador-ai).');
+    } else if (clientesEmpatados.length) {
+      lineas.push('Cliente: SIN ASIGNAR. Este telefono tiene ' + clientesEmpatados.length +
+        ' clientes en Booqable: "' + clientesEmpatados.join('", "') +
+        '" (persona vs empresa?). Elige tu cual va; si hay duda, corrobora con el cliente por WhatsApp.');
     } else {
       lineas.push('Cliente: SIN ASIGNAR (no hubo match seguro por telefono). ' +
         (clienteSugerido
@@ -2700,7 +2707,8 @@ app.post('/webhook/draft-order', async (req, res) => {
       omitidos: omitidos,
       fechas: { inicio: fi, fin: ff, asumidas: fechasAsumidas },
       cliente: customerName || null,
-      cliente_sugerido: clienteSugerido
+      cliente_sugerido: clienteSugerido,
+      clientes_empatados: clientesEmpatados
     });
   } catch (e) {
     console.error('[draft-order] error: ' + (e && e.message));
