@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.17.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.17.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2067,6 +2067,19 @@ app.post('/rewards/pagar', async (req, res) => {
     if (oa.status === 'canceled') {
       return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' esta cancelada' });
     }
+    // Términos §4: el crédito aplica solo en rentas NUEVAS, antes de facturar y
+    // pagar — no en rentas en curso, ya devueltas o ya pagadas. El documento lo
+    // prometía y el server solo rechazaba canceladas (review 31-jul-2026).
+    if (oa.status === 'started' || oa.status === 'stopped') {
+      return res.status(409).json({
+        ok: false,
+        error: 'la orden #' + orderNumber + (oa.status === 'started' ? ' ya esta en curso' : ' ya termino') +
+          ': el credito aplica solo en rentas nuevas, antes de facturar'
+      });
+    }
+    if (oa.payment_status === 'paid') {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el credito se aplica antes del pago' });
+    }
     const totalWithTax = oa.grand_total_with_tax_in_cents || 0;
     if (totalWithTax < reward.credito_cents * 2) {
       return res.status(409).json({
@@ -2183,6 +2196,12 @@ app.post('/rewards/atribuir', async (req, res) => {
     const staff = await rewardsStaffFrom(req);
     if (rewardsStaffDenied(res, staff)) return;
     quienRegistra = staff;
+  }
+  // La vista previa es herramienta del MOSTRADOR (con staff autenticado). En
+  // self-service sería un oráculo silencioso: consultar titulares de órdenes
+  // sin dejar rastro en el Ledger (review 31-jul-2026).
+  if (body.preview && selfService) {
+    return res.status(403).json({ ok: false, error: 'la vista previa es solo del mostrador' });
   }
   const orderNumber = parseInt(body.order_number, 10);
   if (!Number.isFinite(orderNumber)) return res.status(400).json({ ok: false, error: 'order_number invalido' });
