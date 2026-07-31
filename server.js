@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.12.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.13.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2718,6 +2718,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       }
     }
     const yaPedido = [];
+    const ordenesVigentes = [];
     for (const k of Object.keys(ordenesRelevantes)) {
       const o = ordenesRelevantes[k].o;
       const a = o.attributes;
@@ -2732,6 +2733,11 @@ app.post('/webhook/draft-order', async (req, res) => {
       yaPedido.push('#' + a.number + ' (' + a.status + ') ' + (a.starts_at || '').slice(0, 10) +
         ' a ' + (a.stops_at || '').slice(0, 10) + ': ' +
         (items.length ? items.slice(0, 12).join(', ') : 'sin equipo capturado'));
+      ordenesVigentes.push({
+        number: a.number, status: a.status,
+        fi: (a.starts_at || '').slice(0, 10), ff: (a.stops_at || '').slice(0, 10),
+        items: items
+      });
     }
     const bloqueYaPedido = yaPedido.length
       ? '\nORDENES QUE ESTE CLIENTE YA TIENE EN EL SISTEMA (NO las vuelvas a crear):\n' +
@@ -2862,6 +2868,7 @@ app.post('/webhook/draft-order', async (req, res) => {
     if (customerId) patchAttrsBase.customer_id = customerId;
     const resultados = [];
     let patchFallo = false;
+    const conflictos = [];
     for (const sol of solicitudes) {
       const equipos = sol.equipos.filter(function (x) { return x && x.descripcion; });
       let fi = validaFecha(sol.fecha_inicio);
@@ -2872,8 +2879,8 @@ app.post('/webhook/draft-order', async (req, res) => {
       let hReg = validaHora(sol.hora_regreso);
       if (!ff || ff < fi) {
         // Criterio de Barush (28-jul): el regreso normal es a la MANANA SIGUIENTE
-        // 9:00-9:30, no el mismo dia. Solo se queda el mismo dia si el cliente dio
-        // hora de regreso (tipico de estudios rentados por horas).
+        // 9:00-9:30. Solo se queda el mismo dia si el cliente dio hora de regreso
+        // (tipico de estudios rentados por horas).
         if (hReg) {
           ff = fi;
         } else {
@@ -2884,6 +2891,37 @@ app.post('/webhook/draft-order', async (req, res) => {
         }
       }
       if (!hReg) hReg = ff > fi ? '09:30' : '19:00';
+
+      // Resolver productos ANTES de crear nada: asi se puede comparar contra lo
+      // que el cliente YA tiene y no se crean ordenes vacias.
+      const resueltos = [];
+      const noEncontrados = [];
+      const omitidos = Math.max(0, equipos.length - 12);
+      for (const eq of equipos.slice(0, 12)) {
+        const qty = Math.max(1, parseInt(eq.cantidad, 10) || 1);
+        const hit = await draftFindProduct(eq.descripcion);
+        if (!hit) { noEncontrados.push(eq.descripcion); continue; }
+        resueltos.push({ pedido: eq.descripcion, qty: qty, hit: hit });
+      }
+
+      // Choque con una orden existente: fechas que se traslapan + mismo producto.
+      // No se decide solo: se le pregunta al equipo (idea de Daniel).
+      const choques = [];
+      for (const r of resueltos) {
+        const ya = ordenesVigentes.find(function (v) {
+          const seTraslapan = v.fi <= ff && v.ff >= fi;
+          return seTraslapan && v.items.some(function (t) { return t === r.hit.groupName; });
+        });
+        if (ya) choques.push({ producto: r.hit.groupName, orden: ya });
+      }
+      if (choques.length && choques.length === resueltos.length) {
+        conflictos.push({
+          fi: fi, ff: ff,
+          productos: choques.map(function (c) { return c.producto; }),
+          ordenes: Array.from(new Set(choques.map(function (c) { return c.orden.number; })))
+        });
+        continue; // no se crea nada hasta que el equipo aclare
+      }
 
       let orderId;
       try {
@@ -2900,27 +2938,22 @@ app.post('/webhook/draft-order', async (req, res) => {
       }
 
       const agregados = [];
-      const noEncontrados = [];
       const fallaronReserva = [];
-      const omitidos = Math.max(0, equipos.length - 12);
-      for (const eq of equipos.slice(0, 12)) {
-        const qty = Math.max(1, parseInt(eq.cantidad, 10) || 1);
-        const hit = await draftFindProduct(eq.descripcion);
-        if (!hit) { noEncontrados.push(eq.descripcion); continue; }
+      for (const r of resueltos) {
         try {
           await booqableWrite('POST', '/order_fulfillments', {
             data: {
               type: 'order_fulfillments',
               attributes: {
                 order_id: orderId,
-                actions: [{ action: 'book_product', mode: 'create_new', product_id: hit.productId, quantity: qty }]
+                actions: [{ action: 'book_product', mode: 'create_new', product_id: r.hit.productId, quantity: r.qty }]
               }
             }
           });
-          agregados.push(eq.descripcion + ' -> ' + hit.groupName + (qty > 1 ? ' x' + qty : ''));
+          agregados.push(r.pedido + ' -> ' + r.hit.groupName + (r.qty > 1 ? ' x' + r.qty : ''));
         } catch (e) {
-          console.error('[draft-order] book ' + hit.groupName + ': ' + e.message);
-          fallaronReserva.push(eq.descripcion + ' (' + hit.groupName + ')');
+          console.error('[draft-order] book ' + r.hit.groupName + ': ' + e.message);
+          fallaronReserva.push(r.pedido + ' (' + r.hit.groupName + ')');
         }
       }
 
@@ -2948,10 +2981,28 @@ app.post('/webhook/draft-order', async (req, res) => {
       resultados.push({
         orderId: orderId, number: orderNumber, agregados: agregados, noEncontrados: noEncontrados,
         fallaronReserva: fallaronReserva, omitidos: omitidos, totalPedido: equipos.length,
+        parcialmenteRepetida: choques.length ? choques.map(function (c) { return c.producto + ' ya esta en #' + c.orden.number; }) : [],
         fi: fi, ff: ff, hIni: hIni, hReg: hReg, fechasAsumidas: fechasAsumidas,
         sinHora: !validaHora(sol.hora_inicio) && !fechasAsumidas,
         domingo: esDomingo(fi) || esDomingo(ff)
       });
+    }
+
+    // Si TODO lo que pidio ya existe, no se crea nada: se pregunta.
+    if (!resultados.length && conflictos.length) {
+      const l = ['\ud83e\udd16 NO cree ningun borrador para evitar duplicados.'];
+      conflictos.forEach(function (c) {
+        l.push('Ya existe la orden #' + c.ordenes.join(', #') + ' con ' + c.productos.join(', ') +
+          ' en esas mismas fechas (' + c.fi + ' a ' + c.ff + ').');
+      });
+      l.push('');
+      l.push('PREGUNTALE AL CLIENTE (copia y pega):');
+      l.push('  Ya tienes una orden apartada para esas fechas con lo mismo. \u00bfEs una orden NUEVA, ' +
+        'es la misma, o quieres que le movamos a la que ya tienes?');
+      l.push('');
+      l.push('Si es NUEVA: duplica la orden en Booqable o crea otra a mano.');
+      await draftPostComment(contactId, l.join('\n'));
+      return res.json({ ok: true, ordenes: [], conflictos: conflictos });
     }
 
     if (!resultados.length) {
@@ -2961,80 +3012,92 @@ app.post('/webhook/draft-order', async (req, res) => {
     }
 
     // 6) UN comentario con todo. Incluye aviso de posible duplicado.
-    const lineas = [];
+    // El comentario se arma en dos partes y las PREGUNTAS van HASTA ARRIBA:
+    // Respond.io colapsa los comentarios largos con "Show more" y lo que queda
+    // abajo no se ve (Daniel: "hizo la orden pero sin preguntarme a que nombre"
+    // — si preguntaba, pero escondido).
+    const preguntas = [];
+    const cabeza = [];
+    const detalle = [];
     const previo = draftRecientes[contactId];
     const ahora = Date.now();
-    lineas.push(resultados.length === 1
-      ? '\ud83e\udd16 BORRADOR ' + (resultados[0].number ? '#' + resultados[0].number : '(sin numero)') +
-        ' creado en Booqable. NADA se envio al cliente.'
-      : '\ud83e\udd16 ' + resultados.length + ' BORRADORES creados (fechas distintas = ordenes distintas). ' +
+    cabeza.push(resultados.length === 1
+      ? '🤖 BORRADOR ' + (resultados[0].number ? '#' + resultados[0].number : '(sin numero)') +
+        ' creado. NADA se envio al cliente.'
+      : '🤖 ' + resultados.length + ' BORRADORES creados (fechas distintas = ordenes distintas). ' +
         'NADA se envio al cliente.');
-    if (previo && (ahora - previo.at) < 6 * 3600 * 1000) {
-      const mins = Math.round((ahora - previo.at) / 60000);
-      lineas.push('\u26a0\ufe0f OJO POSIBLE DUPLICADO: hace ' + mins + ' min ya se habia creado ' +
-        (previo.numbers.length > 1 ? 'los borradores #' : 'el borrador #') + previo.numbers.join(', #') +
-        ' para este contacto. Si ya no sirven, borralos en Booqable.');
-    }
     draftRecientes[contactId] = {
       at: ahora,
       numbers: resultados.map(function (r) { return r.number || '?'; })
     };
 
-    const preguntas = [];
+    let lineaCliente;
     if (customerName && !patchFallo) {
-      lineas.push('Cliente: ' + customerName + ' (' + (candidatos[0] ? candidatos[0].ordenes : '?') +
-        ' rentas previas). Confirma que va a ESTE cliente antes de enviar.');
+      lineaCliente = 'Cliente: ' + customerName + ' (' + (candidatos[0] ? candidatos[0].ordenes : '?') +
+        ' rentas previas). Confirma que va a ESTE cliente antes de enviar.';
     } else if (customerName && patchFallo) {
-      lineas.push('\u26a0\ufe0f Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
-        customerName + '" \u2014 asignalo a mano (y ponle el tag borrador-ai).');
+      lineaCliente = '⚠️ Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
+        customerName + '" — asignalo a mano (y ponle el tag borrador-ai).';
     } else if (candidatos.length > 1) {
-      lineas.push('Cliente: SIN ASIGNAR \u2014 este contacto tiene ' + candidatos.length + ' registros en Booqable:');
-      candidatos.slice(0, 4).forEach(function (c) {
-        lineas.push('  \u2022 ' + c.name + ' (' + c.ordenes + ' rentas, ultima ' + (c.ultima || 's/f') + ')' +
-          (c.porTelefono ? ' [su telefono]' : ''));
-      });
-      preguntas.push('\u00bfLa orden va a nombre de ' + candidatos[0].name + ' o de ' + candidatos[1].name + '?');
+      lineaCliente = 'Cliente: SIN ASIGNAR — este contacto tiene ' + candidatos.length +
+        ' registros en Booqable: ' + candidatos.slice(0, 4).map(function (c) {
+          return c.name + ' (' + c.ordenes + ' rentas, ultima ' + (c.ultima || 's/f') + ')';
+        }).join(' | ');
+      preguntas.push('¿La orden va a nombre de ' + candidatos[0].name + ' o de ' + candidatos[1].name + '?');
     } else if (candidatos.length === 1) {
-      lineas.push('Cliente: SIN ASIGNAR. Unico parecido: "' + candidatos[0].name + '" (' +
+      lineaCliente = 'Cliente: SIN ASIGNAR. Unico parecido: "' + candidatos[0].name + '" (' +
         candidatos[0].ordenes + ' rentas, ultima ' + (candidatos[0].ultima || 's/f') + ')' +
-        (candidatos[0].porTelefono ? ' \u2014 su telefono coincide pero el nombre no; puede ser su empresa.' : ' \u2014 verificalo.') +
-        ' Asignalo tu si es el correcto.');
-      preguntas.push('\u00bfLa orden va a nombre de ' + candidatos[0].name + '?');
+        (candidatos[0].porTelefono ? ' — su telefono coincide pero el nombre no; puede ser su empresa.' : '.');
+      preguntas.push('¿La orden va a nombre de ' + candidatos[0].name + '?');
     } else {
-      lineas.push('Cliente: SIN ASIGNAR, no lo encontre en Booqable' +
-        (nombreContacto ? ' (en WhatsApp se llama "' + nombreContacto + '")' : '') + '. Crealo o buscalo tu.');
-      preguntas.push('\u00bfA nombre de quien facturamos la orden?');
+      lineaCliente = 'Cliente: SIN ASIGNAR, no lo encontre en Booqable' +
+        (nombreContacto ? ' (en WhatsApp se llama "' + nombreContacto + '")' : '') + '. Crealo o buscalo tu.';
+      preguntas.push('¿A nombre de quien facturamos la orden?');
     }
 
     for (const r of resultados) {
-      lineas.push('');
-      lineas.push((r.number ? '#' + r.number : '(sin numero)') + ' \u2014 recoge ' + r.fi + ' ' + r.hIni +
+      detalle.push('');
+      detalle.push((r.number ? '#' + r.number : '(sin numero)') + ' — recoge ' + r.fi + ' ' + r.hIni +
         ', regresa ' + r.ff + ' ' + r.hReg + (r.fechasAsumidas ? ' (FECHAS ASUMIDAS)' : ''));
-      if (r.agregados.length) lineas.push('  Equipo: ' + r.agregados.join(' | '));
-      if (r.noEncontrados.length) lineas.push('  \u26a0\ufe0f NO encontre en catalogo: ' + r.noEncontrados.join(', '));
-      if (r.fallaronReserva.length) lineas.push('  \u26a0\ufe0f Encontrados pero NO agregados: ' + r.fallaronReserva.join(', '));
-      if (r.omitidos > 0) lineas.push('  \u26a0\ufe0f Pidio ' + r.totalPedido + ' equipos; solo procese 12.');
-      if (r.sinHora) {
-        lineas.push('  \u26a0\ufe0f Sin hora de recoleccion (se asumio 9:00).');
-        preguntas.push('\u00bfA que hora pasas por el equipo el ' + r.fi + '? \u00bfY que dia lo regresas?');
+      if (r.agregados.length) detalle.push('  Equipo: ' + r.agregados.join(' | '));
+      if (r.parcialmenteRepetida && r.parcialmenteRepetida.length) {
+        detalle.push('  ⚠️ Repetido: ' + r.parcialmenteRepetida.join('; '));
+        preguntas.push('Ya tienes apartado ' + r.parcialmenteRepetida[0].split(' ya esta')[0] +
+          ' para esas fechas. ¿Es una orden NUEVA, es la misma, o le movemos a la que ya tienes?');
       }
-      if (r.domingo) lineas.push('  \u26a0\ufe0f Cae en DOMINGO (cerrado) \u2014 ajustar.');
-      lineas.push('  https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
+      if (r.noEncontrados.length) detalle.push('  ⚠️ NO encontre en catalogo: ' + r.noEncontrados.join(', '));
+      if (r.fallaronReserva.length) detalle.push('  ⚠️ Encontrados pero NO agregados: ' + r.fallaronReserva.join(', '));
+      if (r.omitidos > 0) detalle.push('  ⚠️ Pidio ' + r.totalPedido + ' equipos; solo procese 12.');
+      if (r.sinHora) {
+        detalle.push('  ⚠️ Sin hora de recoleccion (se asumio 9:00).');
+        preguntas.push('¿A que hora pasas por el equipo el ' + r.fi + '? ¿Y que dia lo regresas?');
+      }
+      if (r.domingo) detalle.push('  ⚠️ Cae en DOMINGO (cerrado) — ajustar.');
+      detalle.push('  https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
     }
-    if (ext.notas) { lineas.push(''); lineas.push('Notas: ' + String(ext.notas).slice(0, 180)); }
-    // Preguntas listas para copiar y pegar: lo que le falta a la orden para
-    // quedar bien. Las manda el humano (el bot NO le escribe al cliente).
+
     const hayEstudio = resultados.some(function (r) {
       return r.agregados.some(function (a) { return /estudio/i.test(a); });
     });
     if (hayEstudio) {
-      preguntas.push('\u00bfCuantas personas van a estar? \u00bfNecesitas sala adicional o solo el estudio?');
+      preguntas.push('¿Cuantas personas van a estar? ¿Necesitas sala adicional o solo el estudio?');
     }
+
+    const lineas = cabeza.slice();
     if (preguntas.length) {
       lineas.push('');
-      lineas.push('PREGUNTALE AL CLIENTE (copia y pega) \u2014 con esto la orden queda bien:');
+      lineas.push('❓ FALTA PREGUNTARLE AL CLIENTE (copia y pega):');
       preguntas.slice(0, 4).forEach(function (q) { lineas.push('  ' + q); });
     }
+    lineas.push('');
+    lineas.push(lineaCliente);
+    if (previo && (ahora - previo.at) < 6 * 3600 * 1000) {
+      lineas.push('⚠️ Hace ' + Math.round((ahora - previo.at) / 60000) + ' min ya se habia creado ' +
+        (previo.numbers.length > 1 ? 'los borradores #' : 'el borrador #') + previo.numbers.join(', #') +
+        ' para este contacto.');
+    }
+    Array.prototype.push.apply(lineas, detalle);
+    if (ext.notas) { lineas.push(''); lineas.push('Notas: ' + String(ext.notas).slice(0, 160)); }
     await draftPostComment(contactId, lineas.join('\n'));
 
     console.log('[draft-order] ' + resultados.length + ' orden(es) ' +
