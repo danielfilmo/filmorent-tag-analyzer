@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.12.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.12.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2694,28 +2694,44 @@ app.post('/webhook/draft-order', async (req, res) => {
     // ya habia levantado. Se consultan las ordenes vigentes de los candidatos.
     const hoyIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
     const desdeIso = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-    const yaPedido = [];
-    for (const cand of candidatos.slice(0, 2)) {
+    // Fuentes: (a) las ordenes de los clientes candidatos y (b) las ordenes
+    // etiquetadas con ESTA conversacion. La (b) es indispensable: cuando el
+    // cliente queda sin asignar (persona vs empresa), la orden no aparece por
+    // customer_id y el copiloto la volvia a crear.
+    const tagConversacion = 'wa-' + contactId;
+    const ordenesRelevantes = {};
+    const consultas = candidatos.slice(0, 2).map(function (c) {
+      return { url: '/orders?filter[customer_id]=' + c.id + '&sort=-number&page[size]=8', quien: c.name };
+    });
+    consultas.push({
+      url: '/orders?filter[tag_list]=' + encodeURIComponent(tagConversacion) + '&sort=-number&page[size]=8',
+      quien: 'esta conversacion'
+    });
+    for (const q of consultas) {
       let od;
-      try {
-        od = await booqableGet('/orders?filter[customer_id]=' + cand.id + '&sort=-number&page[size]=8');
-      } catch (e) { continue; }
+      try { od = await booqableGet(q.url); } catch (e) { continue; }
       for (const o of (od.data || [])) {
         const a = o.attributes;
         if (!a || a.status === 'canceled') continue;
-        if ((a.stops_at || '').slice(0, 10) < desdeIso) continue; // ya paso, no estorba
-        let items = [];
-        try {
-          const ld = await booqableGet('/lines?filter[owner_id]=' + o.id + '&page[size]=25');
-          items = (ld.data || [])
-            .filter(function (l) { return l.attributes && l.attributes.item_id; })
-            .map(function (l) { return (l.attributes.title || '').trim(); })
-            .filter(Boolean);
-        } catch (e) { /* sin detalle */ }
-        yaPedido.push('#' + a.number + ' (' + a.status + ') ' + (a.starts_at || '').slice(0, 10) +
-          ' a ' + (a.stops_at || '').slice(0, 10) + ' para ' + cand.name + ': ' +
-          (items.length ? items.slice(0, 12).join(', ') : 'sin equipo capturado'));
+        if ((a.stops_at || '').slice(0, 10) < desdeIso) continue;
+        if (!ordenesRelevantes[o.id]) ordenesRelevantes[o.id] = { o: o, quien: q.quien };
       }
+    }
+    const yaPedido = [];
+    for (const k of Object.keys(ordenesRelevantes)) {
+      const o = ordenesRelevantes[k].o;
+      const a = o.attributes;
+      let items = [];
+      try {
+        const ld = await booqableGet('/lines?filter[owner_id]=' + o.id + '&page[size]=25');
+        items = (ld.data || [])
+          .filter(function (l) { return l.attributes && l.attributes.item_id; })
+          .map(function (l) { return (l.attributes.title || '').trim(); })
+          .filter(Boolean);
+      } catch (e) { /* sin detalle */ }
+      yaPedido.push('#' + a.number + ' (' + a.status + ') ' + (a.starts_at || '').slice(0, 10) +
+        ' a ' + (a.stops_at || '').slice(0, 10) + ': ' +
+        (items.length ? items.slice(0, 12).join(', ') : 'sin equipo capturado'));
     }
     const bloqueYaPedido = yaPedido.length
       ? '\nORDENES QUE ESTE CLIENTE YA TIENE EN EL SISTEMA (NO las vuelvas a crear):\n' +
@@ -2842,7 +2858,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       .toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
 
     // 5) Una ORDEN POR SOLICITUD (fechas distintas = ordenes distintas).
-    const patchAttrsBase = { tag_list: ['borrador-ai'] };
+    const patchAttrsBase = { tag_list: ['borrador-ai', tagConversacion] };
     if (customerId) patchAttrsBase.customer_id = customerId;
     const resultados = [];
     let patchFallo = false;
