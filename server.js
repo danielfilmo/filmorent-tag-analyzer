@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.16.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.16.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2453,7 +2453,7 @@ async function draftPostComment(contactId, text) {
     const r = await fetch('https://api.respond.io/v2/contact/id:' + contactId + '/comment', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: String(text).slice(0, 990) })
+      body: JSON.stringify({ text: String(text).slice(0, 1950) }) // la API corta en 2000
     });
     if (!r.ok) console.error('[draft-order] comentario fallo: ' + r.status + ' - ' + (await r.text()));
     return r.ok;
@@ -3128,17 +3128,23 @@ app.post('/webhook/draft-order', async (req, res) => {
     } else if (customerName && patchFallo) {
       lineaCliente = '⚠️ Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
         customerName + '" — asignalo a mano (y ponle el tag borrador-ai).';
-    } else if (candidatos.length > 1) {
-      lineaCliente = 'Cliente: SIN ASIGNAR — este contacto tiene ' + candidatos.length +
-        ' registros en Booqable: ' + candidatos.slice(0, 4).map(function (c) {
-          return c.name + ' (' + c.ordenes + ' rentas, ultima ' + (c.ultima || 's/f') + ')';
-        }).join(' | ');
-      preguntas.push('¿La orden va a nombre de ' + candidatos[0].name + ' o de ' + candidatos[1].name + '?');
-    } else if (candidatos.length === 1) {
-      lineaCliente = 'Cliente: SIN ASIGNAR. Unico parecido: "' + candidatos[0].name + '" (' +
-        candidatos[0].ordenes + ' rentas, ultima ' + (candidatos[0].ultima || 's/f') + ')' +
-        (candidatos[0].porTelefono ? ' — su telefono coincide pero el nombre no; puede ser su empresa.' : '.');
-      preguntas.push('¿La orden va a nombre de ' + candidatos[0].name + '?');
+    } else if (candidatos.length >= 1) {
+      // Con link directo a cada candidato: asignarlo es un clic, no una busqueda.
+      const linkCliente = function (c) {
+        return '  \u2022 ' + c.name + ' (' + c.ordenes + ' rentas, ultima ' + (c.ultima || 's/f') + ')' +
+          '\n    https://filmorent-sa-de-cv.booqable.com/customers/' + c.id;
+      };
+      if (candidatos.length > 1) {
+        lineaCliente = 'Cliente: SIN ASIGNAR — este contacto tiene ' + candidatos.length +
+          ' registros en Booqable, abre el que va y asignalo:\n' +
+          candidatos.slice(0, 3).map(linkCliente).join('\n');
+        preguntas.push('¿La orden va a nombre de ' + candidatos[0].name + ' o de ' + candidatos[1].name + '?');
+      } else {
+        lineaCliente = 'Cliente: SIN ASIGNAR' +
+          (candidatos[0].porTelefono ? ' (su telefono coincide pero el nombre no; puede ser su empresa)' : '') +
+          '. Unico parecido:\n' + linkCliente(candidatos[0]);
+        preguntas.push('¿La orden va a nombre de ' + candidatos[0].name + '?');
+      }
     } else {
       lineaCliente = 'Cliente: SIN ASIGNAR, no lo encontre en Booqable' +
         (nombreContacto ? ' (en WhatsApp se llama "' + nombreContacto + '")' : '') + '. Crealo o buscalo tu.';
