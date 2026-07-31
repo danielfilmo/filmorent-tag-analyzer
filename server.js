@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.11.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.12.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2594,11 +2594,121 @@ app.post('/webhook/draft-order', async (req, res) => {
     const phone = String(contact.phone || '').replace(/[^0-9]/g, '');
 
     // 2) Claude extrae equipo y fechas
+    // 4) Cliente en Booqable.
+    // Un mismo humano suele tener VARIOS registros (el suyo y el de su empresa;
+    // ej. tel 818254xxxx -> "Pasumecha Producciones" 79 ordenes y "Daniel Alonso"
+    // 59 ordenes). Se juntan candidatos por TELEFONO y por NOMBRE, con su
+    // historial, y solo se asigna solo cuando hay UNO. Si hay varios, se listan
+    // con historial y se genera la pregunta para el cliente.
+    const soloDigitos = function (s) { return String(s || '').replace(/[^0-9]/g, ''); };
+    const normTxt = function (s) {
+      return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    };
+    // Con UNA palabra compartida entraba mucho ruido ("Daniel Alonso" matcheaba
+    // "Alfredo Lamas Daniel" y "Joseph Daniel Shay"). Si el contacto tiene nombre
+    // y apellido, se exigen AL MENOS DOS palabras en comun.
+    const compartePalabra = function (a, b) {
+      const nb = normTxt(b);
+      const ws = normTxt(a).split(/\s+/).filter(function (w) { return w.length > 2; });
+      if (!ws.length) return false;
+      const hits = ws.filter(function (w) { return nb.indexOf(w) !== -1; }).length;
+      return ws.length >= 2 ? hits >= 2 : hits >= 1;
+    };
+    const resumeCliente = function (c) {
+      const a = c.attributes;
+      return {
+        id: c.id,
+        name: a.name,
+        ordenes: a.order_count || 0,
+        ultima: (a.latest_order_at || '').slice(0, 10),
+        porTelefono: false
+      };
+    };
+    const candidatos = [];
+    const yaVisto = {};
+    const phone10 = phone.slice(-10);
+    if (phone10.length === 10) {
+      try {
+        const cd = await booqableGet('/customers?filter[q]=' + phone10 + '&page[size]=5');
+        (cd.data || []).forEach(function (c) {
+          const p = (c.attributes && c.attributes.properties) || {};
+          const cuadra = [p.phone, p.phone_2].some(function (t) {
+            const d = soloDigitos(t);
+            return d && d.endsWith(phone10);
+          });
+          if (cuadra && !yaVisto[c.id]) {
+            yaVisto[c.id] = 1;
+            const r = resumeCliente(c);
+            r.porTelefono = true;
+            candidatos.push(r);
+          }
+        });
+      } catch (e) { /* sin candidatos por telefono */ }
+    }
+    if (nombreContacto) {
+      try {
+        const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(nombreContacto) + '&page[size]=5');
+        (cd.data || []).forEach(function (c) {
+          if (yaVisto[c.id] || !c.attributes) return;
+          // filter[q] por nombre es difuso: exigir que comparta palabra Y que
+          // tenga historial real, para no sugerir homonimos al azar.
+          if (!compartePalabra(nombreContacto, c.attributes.name)) return;
+          if (!(c.attributes.order_count > 0)) return;
+          yaVisto[c.id] = 1;
+          candidatos.push(resumeCliente(c));
+        });
+      } catch (e) { /* sin candidatos por nombre */ }
+    }
+    candidatos.sort(function (a, b) { return (b.ultima || '').localeCompare(a.ultima || ''); });
+
+    let customerId = null;
+    let customerName = null;
+    if (candidatos.length === 1 && candidatos[0].porTelefono &&
+        (!nombreContacto || compartePalabra(nombreContacto, candidatos[0].name))) {
+      customerId = candidatos[0].id;
+      customerName = candidatos[0].name;
+    }
+
+
+    // Que ya tiene pedido este cliente en BOOQABLE (la fuente de verdad, no el
+    // chat): sin esto el copiloto volvia a crear ordenes de cosas que el equipo
+    // ya habia levantado. Se consultan las ordenes vigentes de los candidatos.
+    const hoyIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
+    const desdeIso = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const yaPedido = [];
+    for (const cand of candidatos.slice(0, 2)) {
+      let od;
+      try {
+        od = await booqableGet('/orders?filter[customer_id]=' + cand.id + '&sort=-number&page[size]=8');
+      } catch (e) { continue; }
+      for (const o of (od.data || [])) {
+        const a = o.attributes;
+        if (!a || a.status === 'canceled') continue;
+        if ((a.stops_at || '').slice(0, 10) < desdeIso) continue; // ya paso, no estorba
+        let items = [];
+        try {
+          const ld = await booqableGet('/lines?filter[owner_id]=' + o.id + '&page[size]=25');
+          items = (ld.data || [])
+            .filter(function (l) { return l.attributes && l.attributes.item_id; })
+            .map(function (l) { return (l.attributes.title || '').trim(); })
+            .filter(Boolean);
+        } catch (e) { /* sin detalle */ }
+        yaPedido.push('#' + a.number + ' (' + a.status + ') ' + (a.starts_at || '').slice(0, 10) +
+          ' a ' + (a.stops_at || '').slice(0, 10) + ' para ' + cand.name + ': ' +
+          (items.length ? items.slice(0, 12).join(', ') : 'sin equipo capturado'));
+      }
+    }
+    const bloqueYaPedido = yaPedido.length
+      ? '\nORDENES QUE ESTE CLIENTE YA TIENE EN EL SISTEMA (NO las vuelvas a crear):\n' +
+        yaPedido.slice(0, 8).join('\n') + '\n'
+      : '';
+
     const hoyMty = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
     const extractPrompt = 'Eres el asistente interno de Filmorent (renta de equipo audiovisual en Monterrey). ' +
       'Lee esta conversacion de WhatsApp y arma los BORRADORES de orden que hagan falta.\n\n' +
       'HOY es ' + hoyMty + ' (zona America/Monterrey).\n\n' +
-      'CONVERSACION (CLIENTE = el cliente, FILMORENT = nuestro equipo o el bot):\n' + transcript + '\n\n' +
+      'CONVERSACION (CLIENTE = el cliente, FILMORENT = nuestro equipo o el bot):\n' + transcript + '\n' +
+      bloqueYaPedido + '\n' +
       'Regresa UNICAMENTE un objeto JSON valido, sin markdown ni texto extra:\n' +
       '{"solicitudes":[{' +
       '"equipos":[{"descripcion":"nombre CORTO, MAXIMO 5 palabras, SIN parentesis (los detalles van en notas), ej: Sony FX3, DJI Mini 4 Pro, luz Amaran 200x. Para estudios usa exactamente: Estudio Filmo Grand, Estudio Filmo Pocket o Estudio Podcast","cantidad":1}],' +
@@ -2614,7 +2724,9 @@ app.post('/webhook/draft-order', async (req, res) => {
       'Ejemplo: "dos FX3 para manana" + "una FX6 para el miercoles" = DOS solicitudes.\n' +
       'Un estudio por bloques ("3 dias de 4 horas cada dia") = UNA solicitud POR DIA, cada una con su horario.\n' +
       'Solo van juntos en la MISMA solicitud los equipos que se recogen y regresan en las MISMAS fechas.\n\n' +
-      'QUE INCLUIR: SOLO lo pendiente. Si en la conversacion aparece la linea ' +
+      'QUE INCLUIR: SOLO lo que NO tiene orden todavia. Si arriba aparece "ORDENES QUE ESTE CLIENTE ' +
+      'YA TIENE", eso YA ESTA LEVANTADO: NO lo repitas aunque se hable de ello en el chat ' +
+      '(compara equipo Y fechas). Si en la conversacion aparece la linea ' +
       '"TODO LO DE ARRIBA YA SE ATENDIO", ignora por completo lo que este ARRIBA de esa linea: ' +
       'ya se cotizo y ya se le mando. Tampoco incluyas lo que solo pregunto por precio y descarto. ' +
       'Ante la duda de si algo ya se atendio, DEJALO FUERA: es mas facil que el equipo agregue una ' +
@@ -2709,81 +2821,6 @@ app.post('/webhook/draft-order', async (req, res) => {
     const esDomingo = function (s) { return new Date(s + 'T12:00:00Z').getUTCDay() === 0; };
     const manana = new Date(Date.now() + 24 * 3600 * 1000)
       .toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
-
-    // 4) Cliente en Booqable.
-    // Un mismo humano suele tener VARIOS registros (el suyo y el de su empresa;
-    // ej. tel 818254xxxx -> "Pasumecha Producciones" 79 ordenes y "Daniel Alonso"
-    // 59 ordenes). Se juntan candidatos por TELEFONO y por NOMBRE, con su
-    // historial, y solo se asigna solo cuando hay UNO. Si hay varios, se listan
-    // con historial y se genera la pregunta para el cliente.
-    const soloDigitos = function (s) { return String(s || '').replace(/[^0-9]/g, ''); };
-    const normTxt = function (s) {
-      return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    };
-    // Con UNA palabra compartida entraba mucho ruido ("Daniel Alonso" matcheaba
-    // "Alfredo Lamas Daniel" y "Joseph Daniel Shay"). Si el contacto tiene nombre
-    // y apellido, se exigen AL MENOS DOS palabras en comun.
-    const compartePalabra = function (a, b) {
-      const nb = normTxt(b);
-      const ws = normTxt(a).split(/\s+/).filter(function (w) { return w.length > 2; });
-      if (!ws.length) return false;
-      const hits = ws.filter(function (w) { return nb.indexOf(w) !== -1; }).length;
-      return ws.length >= 2 ? hits >= 2 : hits >= 1;
-    };
-    const resumeCliente = function (c) {
-      const a = c.attributes;
-      return {
-        id: c.id,
-        name: a.name,
-        ordenes: a.order_count || 0,
-        ultima: (a.latest_order_at || '').slice(0, 10),
-        porTelefono: false
-      };
-    };
-    const candidatos = [];
-    const yaVisto = {};
-    const phone10 = phone.slice(-10);
-    if (phone10.length === 10) {
-      try {
-        const cd = await booqableGet('/customers?filter[q]=' + phone10 + '&page[size]=5');
-        (cd.data || []).forEach(function (c) {
-          const p = (c.attributes && c.attributes.properties) || {};
-          const cuadra = [p.phone, p.phone_2].some(function (t) {
-            const d = soloDigitos(t);
-            return d && d.endsWith(phone10);
-          });
-          if (cuadra && !yaVisto[c.id]) {
-            yaVisto[c.id] = 1;
-            const r = resumeCliente(c);
-            r.porTelefono = true;
-            candidatos.push(r);
-          }
-        });
-      } catch (e) { /* sin candidatos por telefono */ }
-    }
-    if (nombreContacto) {
-      try {
-        const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(nombreContacto) + '&page[size]=5');
-        (cd.data || []).forEach(function (c) {
-          if (yaVisto[c.id] || !c.attributes) return;
-          // filter[q] por nombre es difuso: exigir que comparta palabra Y que
-          // tenga historial real, para no sugerir homonimos al azar.
-          if (!compartePalabra(nombreContacto, c.attributes.name)) return;
-          if (!(c.attributes.order_count > 0)) return;
-          yaVisto[c.id] = 1;
-          candidatos.push(resumeCliente(c));
-        });
-      } catch (e) { /* sin candidatos por nombre */ }
-    }
-    candidatos.sort(function (a, b) { return (b.ultima || '').localeCompare(a.ultima || ''); });
-
-    let customerId = null;
-    let customerName = null;
-    if (candidatos.length === 1 && candidatos[0].porTelefono &&
-        (!nombreContacto || compartePalabra(nombreContacto, candidatos[0].name))) {
-      customerId = candidatos[0].id;
-      customerName = candidatos[0].name;
-    }
 
     // 5) Una ORDEN POR SOLICITUD (fechas distintas = ordenes distintas).
     const patchAttrsBase = { tag_list: ['borrador-ai'] };
