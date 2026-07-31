@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.6', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.7', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2601,13 +2601,21 @@ app.post('/webhook/draft-order', async (req, res) => {
         ? extractPrompt
         : extractPrompt + '\n\nIMPORTANTE: tu respuesta anterior no fue JSON valido. ' +
           'Responde SOLO el objeto JSON, empezando con { y terminando con }. Sin texto antes ni despues.';
+      // CAUSA RAIZ MEDIDA (30-jul, log de Render): el intento fallaba con
+      // stop_reason=max_tokens y bloques "thinking,text" — el razonamiento
+      // adaptativo se comia el presupuesto y truncaba el JSON. Esta extraccion
+      // no necesita pensar, asi que en el 1er intento se apaga. El 2o intento va
+      // SIN el parametro: si algun dia el modelo no lo acepta, se auto-repara.
+      const params = { model: 'claude-sonnet-5', messages: [{ role: 'user', content: contenido }] };
+      if (intento === 1) {
+        params.max_tokens = 2000;
+        params.thinking = { type: 'disabled' };
+      } else {
+        params.max_tokens = 8000;
+      }
       let resp;
       try {
-        resp = await anthropic.messages.create({
-          model: 'claude-sonnet-5',
-          max_tokens: 8000,
-          messages: [{ role: 'user', content: contenido }]
-        });
+        resp = await anthropic.messages.create(params);
       } catch (e) {
         console.error('[draft-order] error de API en intento ' + intento + ': ' + e.message);
         continue;
