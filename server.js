@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.14.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.14.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -3123,10 +3123,13 @@ app.post('/webhook/draft-order', async (req, res) => {
     }
 
     const lineas = cabeza.slice();
-    if (preguntas.length) {
+    // Sin repetidas: con varias ordenes la misma pregunta salia 2-3 veces
+    // (ej. "el domingo estamos cerrados" por cada orden de ese dia).
+    const preguntasUnicas = preguntas.filter(function (q, i) { return preguntas.indexOf(q) === i; });
+    if (preguntasUnicas.length) {
       lineas.push('');
       lineas.push('❓ FALTA PREGUNTARLE AL CLIENTE (copia y pega):');
-      preguntas.slice(0, 4).forEach(function (q) { lineas.push('  ' + q); });
+      preguntasUnicas.slice(0, 5).forEach(function (q) { lineas.push('  ' + q); });
     }
     lineas.push('');
     lineas.push(lineaCliente);
@@ -3152,7 +3155,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       }),
       cliente: customerName || null,
       candidatos: candidatos,
-      preguntas: preguntas,
+      preguntas: preguntasUnicas,
       duplicado_de: previo && (ahora - previo.at) < 6 * 3600 * 1000 ? previo.numbers : null
     });
   } catch (e) {
