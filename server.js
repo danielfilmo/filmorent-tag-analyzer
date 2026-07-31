@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.11.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.11.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2720,10 +2720,15 @@ app.post('/webhook/draft-order', async (req, res) => {
     const normTxt = function (s) {
       return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     };
+    // Con UNA palabra compartida entraba mucho ruido ("Daniel Alonso" matcheaba
+    // "Alfredo Lamas Daniel" y "Joseph Daniel Shay"). Si el contacto tiene nombre
+    // y apellido, se exigen AL MENOS DOS palabras en comun.
     const compartePalabra = function (a, b) {
       const nb = normTxt(b);
-      return normTxt(a).split(/\s+/).filter(function (w) { return w.length > 2; })
-        .some(function (w) { return nb.indexOf(w) !== -1; });
+      const ws = normTxt(a).split(/\s+/).filter(function (w) { return w.length > 2; });
+      if (!ws.length) return false;
+      const hits = ws.filter(function (w) { return nb.indexOf(w) !== -1; }).length;
+      return ws.length >= 2 ? hits >= 2 : hits >= 1;
     };
     const resumeCliente = function (c) {
       const a = c.attributes;
