@@ -3171,6 +3171,15 @@ app.post('/webhook/draft-order', async (req, res) => {
         detalle.push('  ⚠️ Sin hora de recoleccion (se asumio 9:00).');
         preguntas.push('¿A que hora pasas por el equipo el ' + r.fi + '? ¿Y que dia lo regresas?');
       }
+      if (r.agregados.some(function (a) { return /estudio/i.test(a); })) {
+        // Medido 31-jul: el Filmo Grand tiene 4 tarifas por duracion (Estudio,
+        // Modulo extra, All access, Montaje) y al reservar por API Booqable toma
+        // "Montaje", la mas barata ($2,300 en vez de $4,600 a 4 horas). El
+        // price_tile_id no se deja cambiar por API (el PATCH pasa y se ignora),
+        // asi que se marca para que un humano elija la tarifa correcta.
+        detalle.push('  \u26a0\ufe0f PRECIO DEL ESTUDIO MAL: Booqable puso la tarifa "Montaje" (la mas barata). ' +
+          'Cambia la tarifa en la linea a "Estudio N Horas", "Modulo extra" o "All access" segun lo que ocupe.');
+      }
       if (r.domingo) {
         // NO decirle al cliente que cerramos: si se abre en domingo, con cargo de
         // encargado (dato de Daniel, 30-jul; pendiente confirmar monto con el equipo).
