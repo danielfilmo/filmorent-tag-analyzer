@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.13.3', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.14.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2480,6 +2480,10 @@ async function draftFindProduct(query) {
   const contienePalabra = function (texto, w) {
     const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     if (new RegExp('(^|[^a-z0-9])' + esc + '($|[^a-z0-9])').test(texto)) return true;
+    // Numero PURO: acepta que el catalogo le pegue una letra de variante
+    // ("amaran 300" -> "Amaran 300C RGB"). Solo para numeros solos: "fx3"
+    // NO debe matchear "FX30" porque son camaras distintas.
+    if (/^\d+$/.test(w) && new RegExp('(^|[^a-z0-9])' + esc + '[a-z]($|[^a-z0-9])').test(texto)) return true;
     return w.length >= 6 && texto.replace(/\s+/g, '').indexOf(w) !== -1;
   };
   const genericas = ['luz', 'luces', 'lampara', 'camara', 'lente', 'equipo', 'kit', 'de', 'para', 'con',
@@ -2536,7 +2540,8 @@ async function draftFindProduct(query) {
   if (significativasPegadas.join(' ') !== significativas.join(' ')) niveles.push(significativasPegadas);
   if (significativas.length && significativas.join(' ') !== words.join(' ')) niveles.push(significativas);
   if (significativas.length > 2) niveles.push(significativas.slice(0, 2));
-  if (modelos.length && modelos.length < significativas.length) niveles.push(modelos);
+  // OJO: NO se agrega un nivel con solo el numero. "amaran 300" caia a ["300"]
+  // y traia "Lampara de tungsteno Arri 300". Mejor no encontrar que inventar.
   for (const setPalabras of niveles) {
     if (!setPalabras.length) continue;
     const exactos = candidatos.filter(function (x) {
@@ -2939,6 +2944,17 @@ app.post('/webhook/draft-order', async (req, res) => {
         continue; // no se crea nada hasta que el equipo aclare
       }
 
+      // Los estudios se rentan por BLOQUES DE HORAS (Barush): dejarlos de un dia
+      // para otro cobra la tarifa de 24h (~$20,000 en vez de ~$4,600). Si el
+      // cliente no dio horario, se asume un bloque de 4h y se PREGUNTA.
+      const esEstudio = resueltos.some(function (r) { return /estudio/i.test(r.hit.groupName); });
+      let horarioEstudioAsumido = false;
+      if (esEstudio && !validaHora(sol.hora_regreso)) {
+        ff = fi;
+        hReg = '13:00';
+        horarioEstudioAsumido = true;
+      }
+
       let orderId;
       try {
         const od = await booqableWrite('POST', '/orders', {
@@ -3000,6 +3016,7 @@ app.post('/webhook/draft-order', async (req, res) => {
         parcialmenteRepetida: choques.length ? choques.map(function (c) { return c.producto + ' ya esta en #' + c.orden.number; }) : [],
         fi: fi, ff: ff, hIni: hIni, hReg: hReg, fechasAsumidas: fechasAsumidas,
         sinHora: !validaHora(sol.hora_inicio) && !fechasAsumidas,
+        horarioEstudioAsumido: horarioEstudioAsumido,
         domingo: esDomingo(fi) || esDomingo(ff)
       });
     }
@@ -3084,11 +3101,17 @@ app.post('/webhook/draft-order', async (req, res) => {
       if (r.noEncontrados.length) detalle.push('  ⚠️ NO encontre en catalogo: ' + r.noEncontrados.join(', '));
       if (r.fallaronReserva.length) detalle.push('  ⚠️ Encontrados pero NO agregados: ' + r.fallaronReserva.join(', '));
       if (r.omitidos > 0) detalle.push('  ⚠️ Pidio ' + r.totalPedido + ' equipos; solo procese 12.');
-      if (r.sinHora) {
+      if (r.horarioEstudioAsumido) {
+        detalle.push('  ⚠️ ESTUDIO sin horario: asumi 4 horas (9:00-13:00). El precio cambia mucho segun las horas.');
+        preguntas.push('¿De que hora a que hora ocupas el estudio el ' + r.fi + '? (manejamos bloques de 2, 4, 8 o 12 horas)');
+      } else if (r.sinHora) {
         detalle.push('  ⚠️ Sin hora de recoleccion (se asumio 9:00).');
         preguntas.push('¿A que hora pasas por el equipo el ' + r.fi + '? ¿Y que dia lo regresas?');
       }
-      if (r.domingo) detalle.push('  ⚠️ Cae en DOMINGO (cerrado) — ajustar.');
+      if (r.domingo) {
+        detalle.push('  ⚠️ Cae en DOMINGO y los domingos estamos CERRADOS.');
+        preguntas.push('El domingo estamos cerrados. ¿Te sirve el sabado o el lunes?');
+      }
       detalle.push('  https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
     }
 
