@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.10.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.10.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2776,9 +2776,22 @@ app.post('/webhook/draft-order', async (req, res) => {
       let ff = validaFecha(sol.fecha_regreso);
       const fechasAsumidas = !fi;
       if (!fi) fi = manana;
-      if (!ff || ff < fi) ff = fi;
       const hIni = validaHora(sol.hora_inicio) || '09:00';
-      const hReg = validaHora(sol.hora_regreso) || (ff > fi ? '09:30' : '19:00');
+      let hReg = validaHora(sol.hora_regreso);
+      if (!ff || ff < fi) {
+        // Criterio de Barush (28-jul): el regreso normal es a la MANANA SIGUIENTE
+        // 9:00-9:30, no el mismo dia. Solo se queda el mismo dia si el cliente dio
+        // hora de regreso (tipico de estudios rentados por horas).
+        if (hReg) {
+          ff = fi;
+        } else {
+          ff = new Date(fi + 'T12:00:00Z');
+          ff.setUTCDate(ff.getUTCDate() + 1);
+          ff = ff.toISOString().slice(0, 10);
+          hReg = '09:30';
+        }
+      }
+      if (!hReg) hReg = ff > fi ? '09:30' : '19:00';
 
       let orderId;
       try {
