@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.14.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.15.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2557,6 +2557,39 @@ async function draftFindProduct(query) {
       if (p) return { groupName: g.attributes.name, productId: p.id };
     } catch (e) { /* siguiente nivel */ }
   }
+  // Nada matcheo por texto. Los clientes piden el equipo como ELLOS lo conocen
+  // ("la amaran grande", "un cangrejo", "la camarita chica"), no como se llama en
+  // Booqable, asi que aqui se le pregunta al modelo cual de los candidatos es —
+  // pero solo eligiendo de la lista real del catalogo, nunca inventando.
+  if (candidatos.length && anthropic) {
+    const lista = candidatos.slice(0, 40);
+    try {
+      const resp = await anthropic.messages.create({
+        model: 'claude-sonnet-5',
+        max_tokens: 300,
+        thinking: { type: 'disabled' },
+        messages: [{
+          role: 'user',
+          content: 'Filmorent renta equipo audiovisual en Monterrey. Un cliente pidio por WhatsApp: "' +
+            query + '".\n\nEstos son los productos del catalogo que podrian corresponder:\n' +
+            lista.map(function (c, i) { return (i + 1) + '. ' + c.attributes.name; }).join('\n') +
+            '\n\nResponde SOLO con el numero del que corresponde. Si ninguno corresponde con ' +
+            'CERTEZA, responde 0. Ante la duda responde 0: es mejor que un humano lo agregue a ' +
+            'mano que poner el equipo equivocado en una orden.'
+        }]
+      });
+      const n = parseInt((claudeText(resp).match(/\d+/) || ['0'])[0], 10);
+      if (n >= 1 && n <= lista.length) {
+        const g = lista[n - 1];
+        const pd = await booqableGet('/products?filter[product_group_id]=' + g.id + '&page[size]=1');
+        const p = (pd.data || [])[0];
+        if (p) {
+          console.log('[draft-order] "' + query + '" -> "' + g.attributes.name + '" (elegido por IA)');
+          return { groupName: g.attributes.name, productId: p.id, porIA: true };
+        }
+      }
+    } catch (e) { console.error('[draft-order] desempate IA: ' + e.message); }
+  }
   return null;
 }
 
@@ -2982,7 +3015,8 @@ app.post('/webhook/draft-order', async (req, res) => {
               }
             }
           });
-          agregados.push(r.pedido + ' -> ' + r.hit.groupName + (r.qty > 1 ? ' x' + r.qty : ''));
+          agregados.push(r.pedido + ' -> ' + r.hit.groupName + (r.qty > 1 ? ' x' + r.qty : '') +
+            (r.hit.porIA ? ' (?? verifica: el nombre no coincidia exacto)' : ''));
         } catch (e) {
           console.error('[draft-order] book ' + r.hit.groupName + ': ' + e.message);
           fallaronReserva.push(r.pedido + ' (' + r.hit.groupName + ')');
@@ -3109,8 +3143,9 @@ app.post('/webhook/draft-order', async (req, res) => {
         preguntas.push('¿A que hora pasas por el equipo el ' + r.fi + '? ¿Y que dia lo regresas?');
       }
       if (r.domingo) {
-        detalle.push('  ⚠️ Cae en DOMINGO y los domingos estamos CERRADOS.');
-        preguntas.push('El domingo estamos cerrados. ¿Te sirve el sabado o el lunes?');
+        // NO decirle al cliente que cerramos: si se abre en domingo, con cargo de
+        // encargado (dato de Daniel, 30-jul; pendiente confirmar monto con el equipo).
+        detalle.push('  \u26a0\ufe0f Cae en DOMINGO: confirma disponibilidad y si aplica cargo de encargado.');
       }
       detalle.push('  https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
     }
