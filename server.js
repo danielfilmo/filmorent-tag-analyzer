@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.12.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.12.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2514,7 +2514,26 @@ async function draftFindProduct(query) {
 
   // Exigencia por niveles: todas las palabras -> las significativas ->
   // las primeras 2 significativas -> solo el modelo (fx3, 200x).
+  // El cliente separa lo que el catalogo junta: "Sony A7 IV" vs "Camara Sony A7IV".
+  // Se pegan los tokens cortos contiguos cuando alguno trae digito (a7+iv -> a7iv),
+  // asi "a7iv" si matchea como palabra completa (y sigue sin matchear "A7III").
+  const pegarModelo = function (ws) {
+    const out = [];
+    for (let i = 0; i < ws.length; i++) {
+      const a = ws[i], b = ws[i + 1];
+      // Solo modelo+sufijo: el token traer digito ("a7", "fx3") y el siguiente
+      // ser un sufijo corto SIN digito ("iv", "iii", "s"). Asi no pega "sony"+"a7".
+      if (b && /\d/.test(a) && !/\d/.test(b) && b.length <= 3) {
+        out.push(a + b); i++;
+      } else out.push(a);
+    }
+    return out;
+  };
+  const wordsPegados = pegarModelo(words);
+  const significativasPegadas = pegarModelo(significativas);
   const niveles = [words];
+  if (wordsPegados.join(' ') !== words.join(' ')) niveles.push(wordsPegados);
+  if (significativasPegadas.join(' ') !== significativas.join(' ')) niveles.push(significativasPegadas);
   if (significativas.length && significativas.join(' ') !== words.join(' ')) niveles.push(significativas);
   if (significativas.length > 2) niveles.push(significativas.slice(0, 2));
   if (modelos.length && modelos.length < significativas.length) niveles.push(modelos);
