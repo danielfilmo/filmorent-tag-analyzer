@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.4', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.5', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2460,13 +2460,15 @@ async function draftPostComment(contactId, text) {
 }
 
 // Busca un product group por texto y regresa {groupName, productId} o null.
-// Solo acepta candidatos cuyo nombre contenga TODAS las palabras del query
-// como PALABRA COMPLETA: "grand" no acepta "Grande", "fx3" no acepta "FX30".
-// (filter[q] de Booqable es difuso: para "filmo grand" regresa "Boom Pole
-// Grande" primero.) Sin match confiable regresa null: mejor "agregar a mano"
+// PROBLEMA CONOCIDO de filter[q] con varias palabras: regresa TODO lo que
+// matchee CUALQUIER palabra, en orden alfabetico — para "sony fx3" la camara
+// FX3 ni aparece en la primera pagina (salen adaptadores y baterias). Por eso
+// juntamos candidatos de VARIAS busquedas (incluida cada palabra-modelo tipo
+// "fx3"/"200x" a solas, que si la regresa) y luego exigimos que el nombre
+// contenga las palabras pedidas como PALABRA COMPLETA ("grand" != "Grande",
+// "fx3" != "FX30"). Sin match confiable regresa null: mejor "agregar a mano"
 // que adivinar un producto equivocado.
 async function draftFindProduct(query) {
-  // Sin parentesis ni comillas: "Estudio X (salon para 15)" -> "Estudio X"
   query = String(query || '').replace(/\([^)]*\)/g, ' ').replace(/["']/g, ' ');
   const norm = function (s) {
     return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -2474,38 +2476,58 @@ async function draftFindProduct(query) {
   const contienePalabra = function (texto, w) {
     const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     if (new RegExp('(^|[^a-z0-9])' + esc + '($|[^a-z0-9])').test(texto)) return true;
-    // Palabras largas pegadas: "filmogrand" debe encontrar "Filmo Grand".
-    // Solo >=6 chars para no reabrir "grand" vs "Grande".
     return w.length >= 6 && texto.replace(/\s+/g, '').indexOf(w) !== -1;
   };
-  const genericas = ['luz', 'luces', 'lampara', 'camara', 'lente', 'equipo', 'kit', 'de', 'para', 'con', 'el', 'la', 'un', 'una'];
+  const genericas = ['luz', 'luces', 'lampara', 'camara', 'lente', 'equipo', 'kit', 'de', 'para', 'con',
+    'el', 'la', 'un', 'una', 'unos', 'unas', 'dos', 'tres', 'cuatro', 'cinco', 'par'];
   const words = norm(query).split(/\s+/).filter(function (w) { return w.length > 1; });
+  if (!words.length) return null;
   const significativas = words.filter(function (w) { return genericas.indexOf(w) === -1; });
-  const intentos = [words];
-  if (significativas.length && significativas.length < words.length) intentos.push(significativas);
-  // Ultimo intento: las primeras 2 palabras significativas — la gente nombra el
-  // equipo al inicio ("Estudio FilmoGrand para taller de casting").
-  if (significativas.length > 2) intentos.push(significativas.slice(0, 2));
-  for (const setPalabras of intentos) {
+  const modelos = significativas.filter(function (w) { return /\d/.test(w); });
+
+  // Pool de candidatos: varias busquedas, deduplicadas por id.
+  const queries = [words.join(' ')];
+  if (significativas.length && significativas.length < words.length) queries.push(significativas.join(' '));
+  modelos.forEach(function (w) { queries.push(w); });
+  if (significativas.length > 2) queries.push(significativas.slice(0, 2).join(' '));
+  const vistos = {};
+  const candidatos = [];
+  for (const q of queries) {
+    if (!q || vistos['q:' + q]) continue;
+    vistos['q:' + q] = 1;
     let d;
     try {
-      d = await booqableGet('/product_groups?filter[q]=' + encodeURIComponent(setPalabras.join(' ')) + '&page[size]=10');
+      d = await booqableGet('/product_groups?filter[q]=' + encodeURIComponent(q) + '&page[size]=50');
     } catch (e) { continue; }
-    const exactos = (d.data || []).filter(function (x) {
-      if (!x.attributes || x.attributes.archived) return false;
+    (d.data || []).forEach(function (x) {
+      if (x.attributes && !x.attributes.archived && !vistos[x.id]) {
+        vistos[x.id] = 1;
+        candidatos.push(x);
+      }
+    });
+  }
+  if (!candidatos.length) return null;
+
+  // Exigencia por niveles: todas las palabras -> las significativas ->
+  // las primeras 2 significativas -> solo el modelo (fx3, 200x).
+  const niveles = [words];
+  if (significativas.length && significativas.join(' ') !== words.join(' ')) niveles.push(significativas);
+  if (significativas.length > 2) niveles.push(significativas.slice(0, 2));
+  if (modelos.length && modelos.length < significativas.length) niveles.push(modelos);
+  for (const setPalabras of niveles) {
+    if (!setPalabras.length) continue;
+    const exactos = candidatos.filter(function (x) {
       const n = norm(x.attributes.name);
       return setPalabras.every(function (w) { return contienePalabra(n, w); });
     });
     if (!exactos.length) continue;
-    // Desempate: el nombre mas corto es el mas especifico al query
-    // ("Estudio Filmo Grand" le gana a "Hora extra estudio Filmo Grand").
     exactos.sort(function (a, b) { return a.attributes.name.length - b.attributes.name.length; });
     const g = exactos[0];
     try {
       const pd = await booqableGet('/products?filter[product_group_id]=' + g.id + '&page[size]=1');
       const p = (pd.data || [])[0];
       if (p) return { groupName: g.attributes.name, productId: p.id };
-    } catch (e) { /* siguiente intento */ }
+    } catch (e) { /* siguiente nivel */ }
   }
   return null;
 }
@@ -2553,7 +2575,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       'CONVERSACION (CLIENTE = el cliente, FILMORENT = nuestro equipo o el bot):\n' + transcript + '\n\n' +
       'Regresa UNICAMENTE un objeto JSON valido, sin markdown ni texto extra:\n' +
       '{"equipos":[{"descripcion":"nombre CORTO del equipo, MAXIMO 5 palabras, SIN parentesis ni detalles (esos van en notas), ej: Sony FX3, DJI Mini 4 Pro, luz Amaran 200x. Para estudios usa exactamente: Estudio Filmo Grand, Estudio Filmo Pocket o Estudio Podcast","cantidad":1}],' +
-      '"fecha_inicio":"YYYY-MM-DD o null","fecha_fin":"YYYY-MM-DD o null",' +
+      '"fecha_inicio":"YYYY-MM-DD dia que EMPIEZA a usar el equipo, o null","fecha_regreso":"YYYY-MM-DD dia que REGRESA el equipo (si solo dijo hasta cuando lo USA, el regreso es la manana del dia siguiente), o null","hora_inicio":"HH:MM SOLO si el cliente dijo a que hora recoge, si no null","hora_regreso":"HH:MM SOLO si dijo a que hora regresa, si no null",' +
       '"notas":"detalles utiles para el equipo (horarios, entrega, proyecto, dudas abiertas); breve",' +
       '"confianza":"alta|media|baja"}\n\n' +
       'Reglas: incluye SOLO equipo que el cliente quiere rentar en su solicitud MAS RECIENTE ' +
@@ -2586,26 +2608,48 @@ app.post('/webhook/draft-order', async (req, res) => {
       return res.json({ ok: false, error: 'sin equipos detectados' });
     }
 
-    // 3) Fechas (si no hay, manana 9am-7pm y se avisa en el comentario)
-    let fi = ext.fecha_inicio || null;
-    let ff = ext.fecha_fin || null;
+    // 3) Fechas y horarios.
+    // La cuenta Booqable guarda la hora TAL CUAL con etiqueta +00:00 y la UI
+    // la muestra verbatim (igual que las ordenes que el equipo crea a mano):
+    // NO convertir a UTC real. Politica Filmorent: recoleccion default 9:00,
+    // regreso a la MANANA siguiente 9:30; renta del mismo dia regresa 19:00.
+    const validaFecha = function (s) { return (s && /^\d{4}-\d{2}-\d{2}$/.test(s)) ? s : null; };
+    const validaHora = function (s) {
+      if (!s || !/^\d{1,2}:\d{2}$/.test(s)) return null;
+      return s.length === 4 ? '0' + s : s;
+    };
+    let fi = validaFecha(ext.fecha_inicio);
+    let ff = validaFecha(ext.fecha_regreso) || validaFecha(ext.fecha_fin);
     let fechasAsumidas = false;
-    if (!fi || !/^\d{4}-\d{2}-\d{2}$/.test(fi)) {
+    if (!fi) {
       fi = new Date(Date.now() + 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
       fechasAsumidas = true;
     }
-    if (!ff || !/^\d{4}-\d{2}-\d{2}$/.test(ff) || ff < fi) ff = fi;
-    const startsAt = fi + 'T09:00:00-06:00';
-    const stopsAt = ff + 'T19:00:00-06:00';
+    if (!ff || ff < fi) ff = fi;
+    const hIni = validaHora(ext.hora_inicio) || '09:00';
+    const hReg = validaHora(ext.hora_regreso) || (ff > fi ? '09:30' : '19:00');
+    const startsAt = fi + 'T' + hIni + ':00+00:00';
+    const stopsAt = ff + 'T' + hReg + ':00+00:00';
+    const esDomingo = function (s) { return new Date(s + 'T12:00:00Z').getUTCDay() === 0; };
 
-    // 4) Cliente en Booqable — se asigna SOLO con telefono VERIFICADO.
-    // filter[q] por nombre es demasiado difuso (regresa homonimos y hasta
-    // nombres distintos), asi que el nombre nunca asigna: solo sugiere.
+    // 4) Cliente en Booqable — se asigna SOLO si el telefono esta VERIFICADO
+    // y el nombre del cliente se parece al del contacto de WhatsApp. Si el
+    // telefono es de OTRO nombre (tipico: registro de la empresa vs la
+    // persona), NO se asigna: se listan los candidatos y el equipo decide.
     const soloDigitos = function (s) { return String(s || '').replace(/[^0-9]/g, ''); };
+    const normTxt = function (s) {
+      return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    };
+    const compartePalabra = function (a, b) {
+      const nb = normTxt(b);
+      return normTxt(a).split(/\s+/).filter(function (w) { return w.length > 2; })
+        .some(function (w) { return nb.indexOf(w) !== -1; });
+    };
     let customerId = null;
     let customerName = null;
     let clienteSugerido = null;
     let clientesEmpatados = [];
+    let telNoCuadra = null;
     const phone10 = phone.slice(-10);
     if (phone10.length === 10) {
       try {
@@ -2618,12 +2662,16 @@ app.post('/webhook/draft-order', async (req, res) => {
           });
         });
         if (verificados.length === 1) {
-          customerId = verificados[0].id;
-          customerName = verificados[0].attributes.name;
+          const vName = verificados[0].attributes.name;
+          if (!nombreContacto || compartePalabra(nombreContacto, vName)) {
+            customerId = verificados[0].id;
+            customerName = vName;
+          } else {
+            // El tel es de "Pasumecha Producciones" pero el contacto se llama
+            // "Daniel Alonso": puede ser persona vs empresa. No se adivina.
+            telNoCuadra = vName;
+          }
         } else if (verificados.length > 1) {
-          // Mismo telefono con 2+ clientes (tipico: persona fisica + su
-          // empresa, o freelance). NO se adivina: el equipo elige, o lo
-          // corrobora con el cliente por WhatsApp.
           clientesEmpatados = verificados.map(function (c) { return c.attributes.name; });
         }
       } catch (e) { /* queda sin cliente */ }
@@ -2631,15 +2679,9 @@ app.post('/webhook/draft-order', async (req, res) => {
     if (!customerId && !clientesEmpatados.length && nombreContacto) {
       try {
         const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(nombreContacto) + '&page[size]=3');
-        const normSug = function (s) {
-          return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-        };
-        // filter[q] por nombre regresa cualquier cosa: solo sugerimos si el
-        // candidato comparte al menos una palabra real con el nombre del contacto.
-        const palabrasContacto = normSug(nombreContacto).split(/\s+/).filter(function (w) { return w.length > 2; });
         const c = (cd.data || []).find(function (x) {
-          const n = normSug(x.attributes && x.attributes.name);
-          return palabrasContacto.some(function (w) { return n.indexOf(w) !== -1; });
+          return x.attributes && compartePalabra(nombreContacto, x.attributes.name) &&
+            x.attributes.name !== telNoCuadra;
         });
         if (c) clienteSugerido = c.attributes.name;
       } catch (e) { /* sin sugerencia */ }
@@ -2712,6 +2754,11 @@ app.post('/webhook/draft-order', async (req, res) => {
     } else if (customerName && patchFallo) {
       lineas.push('⚠️ Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
         customerName + '" — asignalo a mano (y ponle el tag borrador-ai).');
+    } else if (telNoCuadra) {
+      lineas.push('Cliente: SIN ASIGNAR. El telefono corresponde a "' + telNoCuadra +
+        '" pero el contacto se llama "' + (nombreContacto || 'sin nombre') + '" (persona vs empresa?)' +
+        (clienteSugerido ? '. Tambien existe el registro "' + clienteSugerido + '"' : '') +
+        '. Elige tu cual va; en duda corrobora con el cliente.');
     } else if (clientesEmpatados.length) {
       lineas.push('Cliente: SIN ASIGNAR. Este telefono tiene ' + clientesEmpatados.length +
         ' clientes en Booqable: "' + clientesEmpatados.join('", "') +
@@ -2724,7 +2771,14 @@ app.post('/webhook/draft-order', async (req, res) => {
             ? 'En WhatsApp se llama "' + nombreContacto + '" — buscalo o crealo en Booqable.'
             : 'Contacto sin nombre en WhatsApp.')));
     }
-    lineas.push('Fechas: ' + fi + ' a ' + ff + (fechasAsumidas ? ' (ASUMIDAS, no habia fechas claras)' : ''));
+    lineas.push('Fechas: recoge ' + fi + ' ' + hIni + ' -> regresa ' + ff + ' ' + hReg +
+      (fechasAsumidas ? ' (ASUMIDAS, no habia fechas claras)' : ''));
+    if (!validaHora(ext.hora_inicio) && !fechasAsumidas) {
+      lineas.push('\u26a0\ufe0f Dio el dia de USO pero no la hora: confirma si pasa la vispera en la tarde o ese dia temprano \u2014 cambia los horarios.');
+    }
+    if (esDomingo(fi) || esDomingo(ff)) {
+      lineas.push('\u26a0\ufe0f Una fecha cae en DOMINGO (cerrado) \u2014 ajustar.');
+    }
     if (agregados.length) lineas.push('Equipo: ' + agregados.join(' | '));
     if (noEncontrados.length) lineas.push('⚠️ NO encontre en catalogo: ' + noEncontrados.join(', ') + ' — agregar a mano');
     if (fallaronReserva.length) lineas.push('⚠️ Encontrados pero NO agregados (fallo la reserva): ' + fallaronReserva.join(', ') + ' — agregalos a mano');
@@ -2742,10 +2796,11 @@ app.post('/webhook/draft-order', async (req, res) => {
       no_encontrados: noEncontrados,
       fallaron_reserva: fallaronReserva,
       omitidos: omitidos,
-      fechas: { inicio: fi, fin: ff, asumidas: fechasAsumidas },
+      fechas: { recoge: fi + ' ' + hIni, regresa: ff + ' ' + hReg, asumidas: fechasAsumidas },
       cliente: customerName || null,
       cliente_sugerido: clienteSugerido,
-      clientes_empatados: clientesEmpatados
+      clientes_empatados: clientesEmpatados,
+      tel_no_cuadra: telNoCuadra
     });
   } catch (e) {
     console.error('[draft-order] error: ' + (e && e.message));
