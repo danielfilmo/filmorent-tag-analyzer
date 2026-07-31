@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.13.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.13.3', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2874,6 +2874,8 @@ app.post('/webhook/draft-order', async (req, res) => {
     if (customerId) patchAttrsBase.customer_id = customerId;
     const resultados = [];
     let patchFallo = false;
+    console.log('[draft-order] ordenes vigentes detectadas: ' + ordenesVigentes.length +
+      (ordenesVigentes.length ? ' -> ' + ordenesVigentes.map(function (v) { return '#' + v.number + '[' + v.items.length + ']'; }).join(' ') : ''));
     const conflictos = [];
     for (const sol of solicitudes) {
       const equipos = sol.equipos.filter(function (x) { return x && x.descripcion; });
@@ -2912,11 +2914,19 @@ app.post('/webhook/draft-order', async (req, res) => {
 
       // Choque con una orden existente: fechas que se traslapan + mismo producto.
       // No se decide solo: se le pregunta al equipo (idea de Daniel).
+      // Comparar SIN espacios ni acentos: varios productos del catalogo traen
+      // espacio al final ("Camara Sony A7IV ") y la linea de la orden viene
+      // recortada, asi que la igualdad estricta fallaba y se duplicaba.
+      const claveProd = function (s) {
+        return String(s || '').trim().toLowerCase().normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ');
+      };
       const choques = [];
       for (const r of resueltos) {
+        const clave = claveProd(r.hit.groupName);
         const ya = ordenesVigentes.find(function (v) {
           const seTraslapan = v.fi <= ff && v.ff >= fi;
-          return seTraslapan && v.items.some(function (t) { return t === r.hit.groupName; });
+          return seTraslapan && v.items.some(function (t) { return claveProd(t) === clave; });
         });
         if (ya) choques.push({ producto: r.hit.groupName, orden: ya });
       }
