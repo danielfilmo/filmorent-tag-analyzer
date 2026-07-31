@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.16.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.17.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2255,6 +2255,30 @@ app.post('/rewards/atribuir', async (req, res) => {
       const td = await booqableGet('/customers/' + oa.customer_id);
       titularNombre = rewardsCleanName((td.data.attributes || {}).name);
     } catch (e3) { /* informativo */ }
+
+    // 4.5) PREVIEW: el mostrador enseña los dos nombres juntos y pide confirmar
+    // ANTES de escribir nada. En la prueba con el equipo (31-jul-2026) se atribuyó
+    // una orden de práctica a un cliente real sin querer: la pantalla nunca puso
+    // enfrente "la renta es de X → los puntos van a Y".
+    if (body.preview) {
+      let yaDe = null;
+      try {
+        const q = await fetch(REWARDS_SHEETS_URL + '?action=atribucion&order_number=' + orderNumber,
+          { redirect: 'follow' }).then(r2 => r2.json());
+        if (q && q.found) yaDe = (q.atribucion || {}).beneficiario || 'otra cuenta';
+      } catch (e5) { /* si el Ledger no responde, el POST real lo vuelve a checar */ }
+      return res.json({
+        ok: true,
+        preview: true,
+        order_number: orderNumber,
+        puntos: puntos,
+        monto_mxn: baseCents / 100,
+        beneficiario: rewardsCleanName((beneficiario.attributes || {}).name),
+        beneficiario_email: (beneficiario.attributes || {}).email || '',
+        titular: titularNombre,
+        ya_atribuida_a: yaDe
+      });
+    }
 
     // 5) registrar en el Ledger (rechaza si la orden ya tiene dueño de puntos)
     const wrote = await fetch(REWARDS_SHEETS_URL, {
