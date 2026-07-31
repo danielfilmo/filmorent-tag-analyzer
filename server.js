@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.5', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.6', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2583,17 +2583,46 @@ app.post('/webhook/draft-order', async (req, res) => {
       'Si dice fechas relativas ("este viernes", "el fin"), calculalas con la fecha de HOY. ' +
       'Si no hay fechas claras usa null. cantidad default 1. Si no pide nada rentable, equipos = [].';
 
-    const extractResp = await anthropic.messages.create({
-      model: 'claude-sonnet-5',
-      max_tokens: 4000,
-      messages: [{ role: 'user', content: extractPrompt }]
-    });
+    // Extraccion con reintento: si la respuesta viene vacia o el JSON no parsea,
+    // se intenta una segunda vez con instruccion mas dura. Cualquier fallo se le
+    // AVISA al equipo en la conversacion — nunca fallar en silencio (el peor bug:
+    // el empleado aprieta el boton y no pasa nada).
+    const parseExt = function (raw) {
+      if (!raw) return null;
+      const ini = raw.indexOf('{');
+      const fin = raw.lastIndexOf('}');
+      if (ini === -1 || fin <= ini) return null;
+      try { return JSON.parse(raw.slice(ini, fin + 1)); } catch (e) { return null; }
+    };
     let ext = null;
-    try {
-      const raw = claudeText(extractResp);
-      ext = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
-    } catch (e) {
-      console.error('[draft-order] JSON de Claude ilegible');
+    let ultimoRaw = '';
+    for (let intento = 1; intento <= 2 && !ext; intento++) {
+      const contenido = intento === 1
+        ? extractPrompt
+        : extractPrompt + '\n\nIMPORTANTE: tu respuesta anterior no fue JSON valido. ' +
+          'Responde SOLO el objeto JSON, empezando con { y terminando con }. Sin texto antes ni despues.';
+      let resp;
+      try {
+        resp = await anthropic.messages.create({
+          model: 'claude-sonnet-5',
+          max_tokens: 8000,
+          messages: [{ role: 'user', content: contenido }]
+        });
+      } catch (e) {
+        console.error('[draft-order] error de API en intento ' + intento + ': ' + e.message);
+        continue;
+      }
+      ultimoRaw = claudeText(resp);
+      console.log('[draft-order] intento ' + intento + ': stop_reason=' + (resp.stop_reason || '?') +
+        ' bloques=' + ((resp.content || []).map(function (b) { return b.type; }).join(',') || 'ninguno') +
+        ' chars=' + ultimoRaw.length);
+      ext = parseExt(ultimoRaw);
+    }
+    if (!ext) {
+      console.error('[draft-order] JSON ilegible tras 2 intentos. Raw: ' + ultimoRaw.slice(0, 400));
+      await draftPostComment(contactId,
+        '\ud83e\udd16 No pude armar el borrador: no logre entender la conversacion (fallo tecnico de lectura). ' +
+        'Vuelve a apretar el boton, o crea la orden a mano en Booqable. Ya quedo registrado para revisarlo.');
       return res.status(422).json({ ok: false, error: 'no se pudo extraer datos de la conversacion' });
     }
     if (!ext || !Array.isArray(ext.equipos)) {
@@ -2804,6 +2833,15 @@ app.post('/webhook/draft-order', async (req, res) => {
     });
   } catch (e) {
     console.error('[draft-order] error: ' + (e && e.message));
+    // Nunca dejar al empleado esperando sin saber que paso.
+    try {
+      const cid = extractContactId(req.body);
+      if (cid && /^\d+$/.test(String(cid))) {
+        await draftPostComment(cid,
+          '\ud83e\udd16 No pude crear el borrador por un error tecnico. Crea la orden a mano en Booqable ' +
+          'o vuelve a intentar en un minuto. (Detalle: ' + String((e && e.message) || e).slice(0, 120) + ')');
+      }
+    } catch (e2) { /* ni modo */ }
     return res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 300) });
   }
 });
