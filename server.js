@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.10.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.11.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2710,10 +2710,12 @@ app.post('/webhook/draft-order', async (req, res) => {
     const manana = new Date(Date.now() + 24 * 3600 * 1000)
       .toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
 
-    // 4) Cliente en Booqable — se asigna SOLO si el telefono esta VERIFICADO
-    // y el nombre del cliente se parece al del contacto de WhatsApp. Si el
-    // telefono es de OTRO nombre (tipico: registro de la empresa vs la
-    // persona), NO se asigna: se listan los candidatos y el equipo decide.
+    // 4) Cliente en Booqable.
+    // Un mismo humano suele tener VARIOS registros (el suyo y el de su empresa;
+    // ej. tel 818254xxxx -> "Pasumecha Producciones" 79 ordenes y "Daniel Alonso"
+    // 59 ordenes). Se juntan candidatos por TELEFONO y por NOMBRE, con su
+    // historial, y solo se asigna solo cuando hay UNO. Si hay varios, se listan
+    // con historial y se genera la pregunta para el cliente.
     const soloDigitos = function (s) { return String(s || '').replace(/[^0-9]/g, ''); };
     const normTxt = function (s) {
       return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -2723,46 +2725,59 @@ app.post('/webhook/draft-order', async (req, res) => {
       return normTxt(a).split(/\s+/).filter(function (w) { return w.length > 2; })
         .some(function (w) { return nb.indexOf(w) !== -1; });
     };
-    let customerId = null;
-    let customerName = null;
-    let clienteSugerido = null;
-    let clientesEmpatados = [];
-    let telNoCuadra = null;
+    const resumeCliente = function (c) {
+      const a = c.attributes;
+      return {
+        id: c.id,
+        name: a.name,
+        ordenes: a.order_count || 0,
+        ultima: (a.latest_order_at || '').slice(0, 10),
+        porTelefono: false
+      };
+    };
+    const candidatos = [];
+    const yaVisto = {};
     const phone10 = phone.slice(-10);
     if (phone10.length === 10) {
       try {
         const cd = await booqableGet('/customers?filter[q]=' + phone10 + '&page[size]=5');
-        const verificados = (cd.data || []).filter(function (c) {
+        (cd.data || []).forEach(function (c) {
           const p = (c.attributes && c.attributes.properties) || {};
-          return [p.phone, p.phone_2].some(function (t) {
+          const cuadra = [p.phone, p.phone_2].some(function (t) {
             const d = soloDigitos(t);
             return d && d.endsWith(phone10);
           });
-        });
-        if (verificados.length === 1) {
-          const vName = verificados[0].attributes.name;
-          if (!nombreContacto || compartePalabra(nombreContacto, vName)) {
-            customerId = verificados[0].id;
-            customerName = vName;
-          } else {
-            // El tel es de "Pasumecha Producciones" pero el contacto se llama
-            // "Daniel Alonso": puede ser persona vs empresa. No se adivina.
-            telNoCuadra = vName;
+          if (cuadra && !yaVisto[c.id]) {
+            yaVisto[c.id] = 1;
+            const r = resumeCliente(c);
+            r.porTelefono = true;
+            candidatos.push(r);
           }
-        } else if (verificados.length > 1) {
-          clientesEmpatados = verificados.map(function (c) { return c.attributes.name; });
-        }
-      } catch (e) { /* queda sin cliente */ }
-    }
-    if (!customerId && !clientesEmpatados.length && nombreContacto) {
-      try {
-        const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(nombreContacto) + '&page[size]=3');
-        const c = (cd.data || []).find(function (x) {
-          return x.attributes && compartePalabra(nombreContacto, x.attributes.name) &&
-            x.attributes.name !== telNoCuadra;
         });
-        if (c) clienteSugerido = c.attributes.name;
-      } catch (e) { /* sin sugerencia */ }
+      } catch (e) { /* sin candidatos por telefono */ }
+    }
+    if (nombreContacto) {
+      try {
+        const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(nombreContacto) + '&page[size]=5');
+        (cd.data || []).forEach(function (c) {
+          if (yaVisto[c.id] || !c.attributes) return;
+          // filter[q] por nombre es difuso: exigir que comparta palabra Y que
+          // tenga historial real, para no sugerir homonimos al azar.
+          if (!compartePalabra(nombreContacto, c.attributes.name)) return;
+          if (!(c.attributes.order_count > 0)) return;
+          yaVisto[c.id] = 1;
+          candidatos.push(resumeCliente(c));
+        });
+      } catch (e) { /* sin candidatos por nombre */ }
+    }
+    candidatos.sort(function (a, b) { return (b.ultima || '').localeCompare(a.ultima || ''); });
+
+    let customerId = null;
+    let customerName = null;
+    if (candidatos.length === 1 && candidatos[0].porTelefono &&
+        (!nombreContacto || compartePalabra(nombreContacto, candidatos[0].name))) {
+      customerId = candidatos[0].id;
+      customerName = candidatos[0].name;
     }
 
     // 5) Una ORDEN POR SOLICITUD (fechas distintas = ordenes distintas).
@@ -2888,27 +2903,30 @@ app.post('/webhook/draft-order', async (req, res) => {
       numbers: resultados.map(function (r) { return r.number || '?'; })
     };
 
+    const preguntas = [];
     if (customerName && !patchFallo) {
-      lineas.push('Cliente: ' + customerName + ' (match por telefono). Confirma que la renta va a ESTE cliente antes de enviar.');
+      lineas.push('Cliente: ' + customerName + ' (' + (candidatos[0] ? candidatos[0].ordenes : '?') +
+        ' rentas previas). Confirma que va a ESTE cliente antes de enviar.');
     } else if (customerName && patchFallo) {
       lineas.push('\u26a0\ufe0f Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
         customerName + '" \u2014 asignalo a mano (y ponle el tag borrador-ai).');
-    } else if (telNoCuadra) {
-      lineas.push('Cliente: SIN ASIGNAR. El telefono corresponde a "' + telNoCuadra +
-        '" pero el contacto se llama "' + (nombreContacto || 'sin nombre') + '" (persona vs empresa?)' +
-        (clienteSugerido ? '. Tambien existe el registro "' + clienteSugerido + '"' : '') +
-        '. Elige tu cual va; en duda corrobora con el cliente.');
-    } else if (clientesEmpatados.length) {
-      lineas.push('Cliente: SIN ASIGNAR. Este telefono tiene ' + clientesEmpatados.length +
-        ' clientes en Booqable: "' + clientesEmpatados.join('", "') +
-        '" (persona vs empresa?). Elige tu cual va; si hay duda, corrobora con el cliente por WhatsApp.');
+    } else if (candidatos.length > 1) {
+      lineas.push('Cliente: SIN ASIGNAR \u2014 este contacto tiene ' + candidatos.length + ' registros en Booqable:');
+      candidatos.slice(0, 4).forEach(function (c) {
+        lineas.push('  \u2022 ' + c.name + ' (' + c.ordenes + ' rentas, ultima ' + (c.ultima || 's/f') + ')' +
+          (c.porTelefono ? ' [su telefono]' : ''));
+      });
+      preguntas.push('\u00bfLa orden va a nombre de ' + candidatos[0].name + ' o de ' + candidatos[1].name + '?');
+    } else if (candidatos.length === 1) {
+      lineas.push('Cliente: SIN ASIGNAR. Unico parecido: "' + candidatos[0].name + '" (' +
+        candidatos[0].ordenes + ' rentas, ultima ' + (candidatos[0].ultima || 's/f') + ')' +
+        (candidatos[0].porTelefono ? ' \u2014 su telefono coincide pero el nombre no; puede ser su empresa.' : ' \u2014 verificalo.') +
+        ' Asignalo tu si es el correcto.');
+      preguntas.push('\u00bfLa orden va a nombre de ' + candidatos[0].name + '?');
     } else {
-      lineas.push('Cliente: SIN ASIGNAR (no hubo match seguro por telefono). ' +
-        (clienteSugerido
-          ? 'Parecido en Booqable: "' + clienteSugerido + '" \u2014 verificalo y asignalo tu.'
-          : (nombreContacto
-            ? 'En WhatsApp se llama "' + nombreContacto + '" \u2014 buscalo o crealo en Booqable.'
-            : 'Contacto sin nombre en WhatsApp.')));
+      lineas.push('Cliente: SIN ASIGNAR, no lo encontre en Booqable' +
+        (nombreContacto ? ' (en WhatsApp se llama "' + nombreContacto + '")' : '') + '. Crealo o buscalo tu.');
+      preguntas.push('\u00bfA nombre de quien facturamos la orden?');
     }
 
     for (const r of resultados) {
@@ -2919,11 +2937,27 @@ app.post('/webhook/draft-order', async (req, res) => {
       if (r.noEncontrados.length) lineas.push('  \u26a0\ufe0f NO encontre en catalogo: ' + r.noEncontrados.join(', '));
       if (r.fallaronReserva.length) lineas.push('  \u26a0\ufe0f Encontrados pero NO agregados: ' + r.fallaronReserva.join(', '));
       if (r.omitidos > 0) lineas.push('  \u26a0\ufe0f Pidio ' + r.totalPedido + ' equipos; solo procese 12.');
-      if (r.sinHora) lineas.push('  \u26a0\ufe0f Sin hora: confirma si pasa la vispera en la tarde o ese dia temprano.');
+      if (r.sinHora) {
+        lineas.push('  \u26a0\ufe0f Sin hora de recoleccion (se asumio 9:00).');
+        preguntas.push('\u00bfA que hora pasas por el equipo el ' + r.fi + '? \u00bfY que dia lo regresas?');
+      }
       if (r.domingo) lineas.push('  \u26a0\ufe0f Cae en DOMINGO (cerrado) \u2014 ajustar.');
       lineas.push('  https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
     }
     if (ext.notas) { lineas.push(''); lineas.push('Notas: ' + String(ext.notas).slice(0, 180)); }
+    // Preguntas listas para copiar y pegar: lo que le falta a la orden para
+    // quedar bien. Las manda el humano (el bot NO le escribe al cliente).
+    const hayEstudio = resultados.some(function (r) {
+      return r.agregados.some(function (a) { return /estudio/i.test(a); });
+    });
+    if (hayEstudio) {
+      preguntas.push('\u00bfCuantas personas van a estar? \u00bfNecesitas sala adicional o solo el estudio?');
+    }
+    if (preguntas.length) {
+      lineas.push('');
+      lineas.push('PREGUNTALE AL CLIENTE (copia y pega) \u2014 con esto la orden queda bien:');
+      preguntas.slice(0, 4).forEach(function (q) { lineas.push('  ' + q); });
+    }
     await draftPostComment(contactId, lineas.join('\n'));
 
     console.log('[draft-order] ' + resultados.length + ' orden(es) ' +
@@ -2938,9 +2972,8 @@ app.post('/webhook/draft-order', async (req, res) => {
         };
       }),
       cliente: customerName || null,
-      cliente_sugerido: clienteSugerido,
-      clientes_empatados: clientesEmpatados,
-      tel_no_cuadra: telNoCuadra,
+      candidatos: candidatos,
+      preguntas: preguntas,
       duplicado_de: previo && (ahora - previo.at) < 6 * 3600 * 1000 ? previo.numbers : null
     });
   } catch (e) {
