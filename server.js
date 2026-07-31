@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.7', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.10.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2436,6 +2436,10 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
 
 const DRAFT_ORDER_TOKEN = process.env.DRAFT_ORDER_TOKEN || '';
 
+// Memoria corta contactId -> {at, numbers} para avisar de posibles duplicados
+// cuando alguien aprieta el boton dos veces sobre la misma conversacion.
+const draftRecientes = {};
+
 async function draftRespondioGet(path) {
   const r = await fetch('https://api.respond.io/v2' + path, {
     headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' }
@@ -2570,18 +2574,29 @@ app.post('/webhook/draft-order', async (req, res) => {
     // 2) Claude extrae equipo y fechas
     const hoyMty = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
     const extractPrompt = 'Eres el asistente interno de Filmorent (renta de equipo audiovisual en Monterrey). ' +
-      'Lee esta conversacion de WhatsApp y extrae SOLO lo necesario para armar un BORRADOR de orden de renta.\n\n' +
+      'Lee esta conversacion de WhatsApp y arma los BORRADORES de orden que hagan falta.\n\n' +
       'HOY es ' + hoyMty + ' (zona America/Monterrey).\n\n' +
       'CONVERSACION (CLIENTE = el cliente, FILMORENT = nuestro equipo o el bot):\n' + transcript + '\n\n' +
       'Regresa UNICAMENTE un objeto JSON valido, sin markdown ni texto extra:\n' +
-      '{"equipos":[{"descripcion":"nombre CORTO del equipo, MAXIMO 5 palabras, SIN parentesis ni detalles (esos van en notas), ej: Sony FX3, DJI Mini 4 Pro, luz Amaran 200x. Para estudios usa exactamente: Estudio Filmo Grand, Estudio Filmo Pocket o Estudio Podcast","cantidad":1}],' +
-      '"fecha_inicio":"YYYY-MM-DD dia que EMPIEZA a usar el equipo, o null","fecha_regreso":"YYYY-MM-DD dia que REGRESA el equipo (si solo dijo hasta cuando lo USA, el regreso es la manana del dia siguiente), o null","hora_inicio":"HH:MM SOLO si el cliente dijo a que hora recoge, si no null","hora_regreso":"HH:MM SOLO si dijo a que hora regresa, si no null",' +
-      '"notas":"detalles utiles para el equipo (horarios, entrega, proyecto, dudas abiertas); breve",' +
+      '{"solicitudes":[{' +
+      '"equipos":[{"descripcion":"nombre CORTO, MAXIMO 5 palabras, SIN parentesis (los detalles van en notas), ej: Sony FX3, DJI Mini 4 Pro, luz Amaran 200x. Para estudios usa exactamente: Estudio Filmo Grand, Estudio Filmo Pocket o Estudio Podcast","cantidad":1}],' +
+      '"fecha_inicio":"YYYY-MM-DD dia que EMPIEZA a usar, o null",' +
+      '"fecha_regreso":"YYYY-MM-DD dia que REGRESA (si solo dijo hasta cuando lo USA, el regreso es la manana del dia siguiente), o null",' +
+      '"hora_inicio":"HH:MM SOLO si dijo a que hora recoge, si no null",' +
+      '"hora_regreso":"HH:MM SOLO si dijo a que hora regresa, si no null"' +
+      '}],' +
+      '"notas":"detalles utiles para el equipo (proyecto, dudas abiertas, entrega); breve",' +
       '"confianza":"alta|media|baja"}\n\n' +
-      'Reglas: incluye SOLO equipo que el cliente quiere rentar en su solicitud MAS RECIENTE ' +
-      '(no lo que pregunto hace semanas y descarto, no lo que solo pregunto por precio y dijo que no). ' +
-      'Si dice fechas relativas ("este viernes", "el fin"), calculalas con la fecha de HOY. ' +
-      'Si no hay fechas claras usa null. cantidad default 1. Si no pide nada rentable, equipos = [].';
+      'REGLA MAS IMPORTANTE — UNA SOLICITUD POR RANGO DE FECHAS:\n' +
+      'Si el cliente pidio cosas para DIAS DISTINTOS, son solicitudes SEPARADAS, NO las juntes.\n' +
+      'Ejemplo: "dos FX3 para manana" + "una FX6 para el miercoles" = DOS solicitudes.\n' +
+      'Un estudio por bloques ("3 dias de 4 horas cada dia") = UNA solicitud POR DIA, cada una con su horario.\n' +
+      'Solo van juntos en la MISMA solicitud los equipos que se recogen y regresan en las MISMAS fechas.\n\n' +
+      'QUE INCLUIR: solo lo que sigue PENDIENTE de la conversacion. Si Filmorent ya le mando la orden, ' +
+      'la cotizacion o el link de pago de algo, ESO YA ESTA HECHO: NO lo repitas. Tampoco incluyas lo que ' +
+      'solo pregunto por precio y descarto, ni lo de semanas pasadas ya resuelto.\n' +
+      'Fechas relativas ("este viernes", "el fin") se calculan con la fecha de HOY. cantidad default 1. ' +
+      'Si no hay nada pendiente que rentar, solicitudes = [].';
 
     // Extraccion con reintento: si la respuesta viene vacia o el JSON no parsea,
     // se intenta una segunda vez con instruccion mas dura. Cualquier fallo se le
@@ -2633,41 +2648,43 @@ app.post('/webhook/draft-order', async (req, res) => {
         'Vuelve a apretar el boton, o crea la orden a mano en Booqable. Ya quedo registrado para revisarlo.');
       return res.status(422).json({ ok: false, error: 'no se pudo extraer datos de la conversacion' });
     }
-    if (!ext || !Array.isArray(ext.equipos)) {
-      console.error('[draft-order] extraccion sin campo equipos');
+    // Compatibilidad: si el modelo regresa el formato viejo {equipos:[...]},
+    // se envuelve como una sola solicitud.
+    let solicitudes = Array.isArray(ext.solicitudes) ? ext.solicitudes : null;
+    if (!solicitudes && Array.isArray(ext.equipos)) {
+      solicitudes = [{
+        equipos: ext.equipos, fecha_inicio: ext.fecha_inicio, fecha_regreso: ext.fecha_regreso,
+        hora_inicio: ext.hora_inicio, hora_regreso: ext.hora_regreso
+      }];
+    }
+    if (!solicitudes) {
+      console.error('[draft-order] extraccion sin solicitudes');
       return res.status(422).json({ ok: false, error: 'extraccion incompleta, reintenta' });
     }
-    const equipos = ext.equipos.filter(function (x) { return x && x.descripcion; });
-    if (!equipos.length) {
+    solicitudes = solicitudes.filter(function (s) {
+      return s && Array.isArray(s.equipos) &&
+        s.equipos.filter(function (x) { return x && x.descripcion; }).length;
+    }).slice(0, 6);
+    if (!solicitudes.length) {
       await draftPostComment(contactId,
-        '🤖 Borrador de orden: no encontre en la conversacion un equipo claro que el cliente quiera rentar. ' +
-        'Crea la orden a mano en Booqable.');
-      return res.json({ ok: false, error: 'sin equipos detectados' });
+        '\ud83e\udd16 Borrador de orden: no encontre nada PENDIENTE que rentar en esta conversacion ' +
+        '(puede ser que ya se le haya mandado la orden). Si falta algo, crealo a mano en Booqable.');
+      return res.json({ ok: false, error: 'sin equipos pendientes detectados' });
     }
 
-    // 3) Fechas y horarios.
-    // La cuenta Booqable guarda la hora TAL CUAL con etiqueta +00:00 y la UI
-    // la muestra verbatim (igual que las ordenes que el equipo crea a mano):
-    // NO convertir a UTC real. Politica Filmorent: recoleccion default 9:00,
-    // regreso a la MANANA siguiente 9:30; renta del mismo dia regresa 19:00.
+    // 3) Helpers de fechas/horas.
+    // Booqable guarda la hora VERBATIM con etiqueta +00:00 (igual que las ordenes
+    // que el equipo crea a mano): NO convertir a UTC real.
+    // Politica Filmorent: recoleccion 9:00; regreso a la MANANA siguiente 9:30;
+    // renta del mismo dia regresa 19:00.
     const validaFecha = function (s) { return (s && /^\d{4}-\d{2}-\d{2}$/.test(s)) ? s : null; };
     const validaHora = function (s) {
       if (!s || !/^\d{1,2}:\d{2}$/.test(s)) return null;
       return s.length === 4 ? '0' + s : s;
     };
-    let fi = validaFecha(ext.fecha_inicio);
-    let ff = validaFecha(ext.fecha_regreso) || validaFecha(ext.fecha_fin);
-    let fechasAsumidas = false;
-    if (!fi) {
-      fi = new Date(Date.now() + 24 * 3600 * 1000).toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
-      fechasAsumidas = true;
-    }
-    if (!ff || ff < fi) ff = fi;
-    const hIni = validaHora(ext.hora_inicio) || '09:00';
-    const hReg = validaHora(ext.hora_regreso) || (ff > fi ? '09:30' : '19:00');
-    const startsAt = fi + 'T' + hIni + ':00+00:00';
-    const stopsAt = ff + 'T' + hReg + ':00+00:00';
     const esDomingo = function (s) { return new Date(s + 'T12:00:00Z').getUTCDay() === 0; };
+    const manana = new Date(Date.now() + 24 * 3600 * 1000)
+      .toLocaleDateString('en-CA', { timeZone: 'America/Monterrey' });
 
     // 4) Cliente en Booqable — se asigna SOLO si el telefono esta VERIFICADO
     // y el nombre del cliente se parece al del contacto de WhatsApp. Si el
@@ -2724,73 +2741,121 @@ app.post('/webhook/draft-order', async (req, res) => {
       } catch (e) { /* sin sugerencia */ }
     }
 
-    // 5) Crear la orden y agregar productos
-    const od = await booqableWrite('POST', '/orders', {
-      data: { type: 'orders', attributes: { starts_at: startsAt, stops_at: stopsAt } }
-    });
-    const orderId = od.data.id;
+    // 5) Una ORDEN POR SOLICITUD (fechas distintas = ordenes distintas).
+    const patchAttrsBase = { tag_list: ['borrador-ai'] };
+    if (customerId) patchAttrsBase.customer_id = customerId;
+    const resultados = [];
+    let patchFallo = false;
+    for (const sol of solicitudes) {
+      const equipos = sol.equipos.filter(function (x) { return x && x.descripcion; });
+      let fi = validaFecha(sol.fecha_inicio);
+      let ff = validaFecha(sol.fecha_regreso);
+      const fechasAsumidas = !fi;
+      if (!fi) fi = manana;
+      if (!ff || ff < fi) ff = fi;
+      const hIni = validaHora(sol.hora_inicio) || '09:00';
+      const hReg = validaHora(sol.hora_regreso) || (ff > fi ? '09:30' : '19:00');
 
-    const agregados = [];
-    const noEncontrados = [];
-    const fallaronReserva = [];
-    const omitidos = Math.max(0, equipos.length - 12);
-    for (const eq of equipos.slice(0, 12)) {
-      const qty = Math.max(1, parseInt(eq.cantidad, 10) || 1);
-      const hit = await draftFindProduct(eq.descripcion);
-      if (!hit) { noEncontrados.push(eq.descripcion); continue; }
+      let orderId;
       try {
-        await booqableWrite('POST', '/order_fulfillments', {
+        const od = await booqableWrite('POST', '/orders', {
           data: {
-            type: 'order_fulfillments',
-            attributes: {
-              order_id: orderId,
-              actions: [{ action: 'book_product', mode: 'create_new', product_id: hit.productId, quantity: qty }]
-            }
+            type: 'orders',
+            attributes: { starts_at: fi + 'T' + hIni + ':00+00:00', stops_at: ff + 'T' + hReg + ':00+00:00' }
           }
         });
-        agregados.push(eq.descripcion + ' -> ' + hit.groupName + (qty > 1 ? ' x' + qty : ''));
+        orderId = od.data.id;
       } catch (e) {
-        console.error('[draft-order] book ' + hit.groupName + ': ' + e.message);
-        fallaronReserva.push(eq.descripcion + ' (' + hit.groupName + ')');
+        console.error('[draft-order] no se pudo crear la orden: ' + e.message);
+        continue;
       }
-    }
 
-    // 6) Cliente + tag, y transicion a draft (le da numero y lo hace visible)
-    const patchAttrs = { tag_list: ['borrador-ai'] };
-    if (customerId) patchAttrs.customer_id = customerId;
-    let patchFallo = false;
-    try {
-      await booqableWrite('PATCH', '/orders/' + orderId, {
-        data: { type: 'orders', id: orderId, attributes: patchAttrs }
-      });
-    } catch (e) {
-      patchFallo = true;
-      console.error('[draft-order] patch cliente/tag: ' + e.message);
-    }
-
-    let orderNumber = null;
-    try {
-      await booqableWrite('POST', '/order_status_transitions', {
-        data: {
-          type: 'order_status_transitions',
-          attributes: { order_id: orderId, transition_from: 'new', transition_to: 'draft' }
+      const agregados = [];
+      const noEncontrados = [];
+      const fallaronReserva = [];
+      const omitidos = Math.max(0, equipos.length - 12);
+      for (const eq of equipos.slice(0, 12)) {
+        const qty = Math.max(1, parseInt(eq.cantidad, 10) || 1);
+        const hit = await draftFindProduct(eq.descripcion);
+        if (!hit) { noEncontrados.push(eq.descripcion); continue; }
+        try {
+          await booqableWrite('POST', '/order_fulfillments', {
+            data: {
+              type: 'order_fulfillments',
+              attributes: {
+                order_id: orderId,
+                actions: [{ action: 'book_product', mode: 'create_new', product_id: hit.productId, quantity: qty }]
+              }
+            }
+          });
+          agregados.push(eq.descripcion + ' -> ' + hit.groupName + (qty > 1 ? ' x' + qty : ''));
+        } catch (e) {
+          console.error('[draft-order] book ' + hit.groupName + ': ' + e.message);
+          fallaronReserva.push(eq.descripcion + ' (' + hit.groupName + ')');
         }
-      });
-      const chk = await booqableGet('/orders/' + orderId);
-      orderNumber = chk.data.attributes.number;
-    } catch (e) { console.error('[draft-order] transicion a draft: ' + e.message); }
+      }
 
-    // 7) Comentario interno con el resumen
-    const orderUrl = 'https://filmorent-sa-de-cv.booqable.com/orders/' + orderId;
+      try {
+        await booqableWrite('PATCH', '/orders/' + orderId, {
+          data: { type: 'orders', id: orderId, attributes: patchAttrsBase }
+        });
+      } catch (e) {
+        patchFallo = true;
+        console.error('[draft-order] patch cliente/tag: ' + e.message);
+      }
+
+      let orderNumber = null;
+      try {
+        await booqableWrite('POST', '/order_status_transitions', {
+          data: {
+            type: 'order_status_transitions',
+            attributes: { order_id: orderId, transition_from: 'new', transition_to: 'draft' }
+          }
+        });
+        const chk = await booqableGet('/orders/' + orderId);
+        orderNumber = chk.data.attributes.number;
+      } catch (e) { console.error('[draft-order] transicion a draft: ' + e.message); }
+
+      resultados.push({
+        orderId: orderId, number: orderNumber, agregados: agregados, noEncontrados: noEncontrados,
+        fallaronReserva: fallaronReserva, omitidos: omitidos, totalPedido: equipos.length,
+        fi: fi, ff: ff, hIni: hIni, hReg: hReg, fechasAsumidas: fechasAsumidas,
+        sinHora: !validaHora(sol.hora_inicio) && !fechasAsumidas,
+        domingo: esDomingo(fi) || esDomingo(ff)
+      });
+    }
+
+    if (!resultados.length) {
+      await draftPostComment(contactId,
+        '\ud83e\udd16 No pude crear el borrador en Booqable (error al crear la orden). Hazlo a mano por favor.');
+      return res.status(502).json({ ok: false, error: 'no se pudo crear ninguna orden' });
+    }
+
+    // 6) UN comentario con todo. Incluye aviso de posible duplicado.
     const lineas = [];
-    lineas.push('🤖 BORRADOR ' + (orderNumber ? '#' + orderNumber : '(sin numero)') +
-      ' creado en Booqable. NADA se envio al cliente.');
-    lineas.push(orderUrl);
+    const previo = draftRecientes[contactId];
+    const ahora = Date.now();
+    lineas.push(resultados.length === 1
+      ? '\ud83e\udd16 BORRADOR ' + (resultados[0].number ? '#' + resultados[0].number : '(sin numero)') +
+        ' creado en Booqable. NADA se envio al cliente.'
+      : '\ud83e\udd16 ' + resultados.length + ' BORRADORES creados (fechas distintas = ordenes distintas). ' +
+        'NADA se envio al cliente.');
+    if (previo && (ahora - previo.at) < 6 * 3600 * 1000) {
+      const mins = Math.round((ahora - previo.at) / 60000);
+      lineas.push('\u26a0\ufe0f OJO POSIBLE DUPLICADO: hace ' + mins + ' min ya se habia creado ' +
+        (previo.numbers.length > 1 ? 'los borradores #' : 'el borrador #') + previo.numbers.join(', #') +
+        ' para este contacto. Si ya no sirven, borralos en Booqable.');
+    }
+    draftRecientes[contactId] = {
+      at: ahora,
+      numbers: resultados.map(function (r) { return r.number || '?'; })
+    };
+
     if (customerName && !patchFallo) {
       lineas.push('Cliente: ' + customerName + ' (match por telefono). Confirma que la renta va a ESTE cliente antes de enviar.');
     } else if (customerName && patchFallo) {
-      lineas.push('⚠️ Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
-        customerName + '" — asignalo a mano (y ponle el tag borrador-ai).');
+      lineas.push('\u26a0\ufe0f Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
+        customerName + '" \u2014 asignalo a mano (y ponle el tag borrador-ai).');
     } else if (telNoCuadra) {
       lineas.push('Cliente: SIN ASIGNAR. El telefono corresponde a "' + telNoCuadra +
         '" pero el contacto se llama "' + (nombreContacto || 'sin nombre') + '" (persona vs empresa?)' +
@@ -2803,41 +2868,43 @@ app.post('/webhook/draft-order', async (req, res) => {
     } else {
       lineas.push('Cliente: SIN ASIGNAR (no hubo match seguro por telefono). ' +
         (clienteSugerido
-          ? 'Parecido en Booqable: "' + clienteSugerido + '" — verificalo y asignalo tu.'
+          ? 'Parecido en Booqable: "' + clienteSugerido + '" \u2014 verificalo y asignalo tu.'
           : (nombreContacto
-            ? 'En WhatsApp se llama "' + nombreContacto + '" — buscalo o crealo en Booqable.'
+            ? 'En WhatsApp se llama "' + nombreContacto + '" \u2014 buscalo o crealo en Booqable.'
             : 'Contacto sin nombre en WhatsApp.')));
     }
-    lineas.push('Fechas: recoge ' + fi + ' ' + hIni + ' -> regresa ' + ff + ' ' + hReg +
-      (fechasAsumidas ? ' (ASUMIDAS, no habia fechas claras)' : ''));
-    if (!validaHora(ext.hora_inicio) && !fechasAsumidas) {
-      lineas.push('\u26a0\ufe0f Dio el dia de USO pero no la hora: confirma si pasa la vispera en la tarde o ese dia temprano \u2014 cambia los horarios.');
+
+    for (const r of resultados) {
+      lineas.push('');
+      lineas.push((r.number ? '#' + r.number : '(sin numero)') + ' \u2014 recoge ' + r.fi + ' ' + r.hIni +
+        ', regresa ' + r.ff + ' ' + r.hReg + (r.fechasAsumidas ? ' (FECHAS ASUMIDAS)' : ''));
+      if (r.agregados.length) lineas.push('  Equipo: ' + r.agregados.join(' | '));
+      if (r.noEncontrados.length) lineas.push('  \u26a0\ufe0f NO encontre en catalogo: ' + r.noEncontrados.join(', '));
+      if (r.fallaronReserva.length) lineas.push('  \u26a0\ufe0f Encontrados pero NO agregados: ' + r.fallaronReserva.join(', '));
+      if (r.omitidos > 0) lineas.push('  \u26a0\ufe0f Pidio ' + r.totalPedido + ' equipos; solo procese 12.');
+      if (r.sinHora) lineas.push('  \u26a0\ufe0f Sin hora: confirma si pasa la vispera en la tarde o ese dia temprano.');
+      if (r.domingo) lineas.push('  \u26a0\ufe0f Cae en DOMINGO (cerrado) \u2014 ajustar.');
+      lineas.push('  https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
     }
-    if (esDomingo(fi) || esDomingo(ff)) {
-      lineas.push('\u26a0\ufe0f Una fecha cae en DOMINGO (cerrado) \u2014 ajustar.');
-    }
-    if (agregados.length) lineas.push('Equipo: ' + agregados.join(' | '));
-    if (noEncontrados.length) lineas.push('⚠️ NO encontre en catalogo: ' + noEncontrados.join(', ') + ' — agregar a mano');
-    if (fallaronReserva.length) lineas.push('⚠️ Encontrados pero NO agregados (fallo la reserva): ' + fallaronReserva.join(', ') + ' — agregalos a mano');
-    if (omitidos > 0) lineas.push('⚠️ El cliente menciono ' + equipos.length + ' equipos; solo procese los primeros 12.');
-    if (ext.notas) lineas.push('Notas: ' + String(ext.notas).slice(0, 180));
-    lineas.push('Revisa fechas/precios/cliente y envia desde Booqable.');
+    if (ext.notas) { lineas.push(''); lineas.push('Notas: ' + String(ext.notas).slice(0, 180)); }
     await draftPostComment(contactId, lineas.join('\n'));
 
-    console.log('[draft-order] orden ' + (orderNumber || orderId) + ' creada para contacto ' + contactId);
+    console.log('[draft-order] ' + resultados.length + ' orden(es) ' +
+      resultados.map(function (r) { return r.number; }).join(',') + ' para contacto ' + contactId);
     return res.json({
       ok: true,
-      order_id: orderId,
-      number: orderNumber,
-      agregados: agregados,
-      no_encontrados: noEncontrados,
-      fallaron_reserva: fallaronReserva,
-      omitidos: omitidos,
-      fechas: { recoge: fi + ' ' + hIni, regresa: ff + ' ' + hReg, asumidas: fechasAsumidas },
+      ordenes: resultados.map(function (r) {
+        return {
+          number: r.number, order_id: r.orderId, agregados: r.agregados,
+          no_encontrados: r.noEncontrados, fallaron_reserva: r.fallaronReserva,
+          recoge: r.fi + ' ' + r.hIni, regresa: r.ff + ' ' + r.hReg, fechas_asumidas: r.fechasAsumidas
+        };
+      }),
       cliente: customerName || null,
       cliente_sugerido: clienteSugerido,
       clientes_empatados: clientesEmpatados,
-      tel_no_cuadra: telNoCuadra
+      tel_no_cuadra: telNoCuadra,
+      duplicado_de: previo && (ahora - previo.at) < 6 * 3600 * 1000 ? previo.numbers : null
     });
   } catch (e) {
     console.error('[draft-order] error: ' + (e && e.message));
