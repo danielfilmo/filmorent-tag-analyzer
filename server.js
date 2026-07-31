@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.10.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.10.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2557,12 +2557,34 @@ app.post('/webhook/draft-order', async (req, res) => {
       draftRespondioGet('/contact/id:' + contactId + '/message/list?limit=60')
     ]);
     const msgs = (messagesData.items || messagesData.data || []).slice().reverse(); // cronologico
-    const transcript = msgs.map(function (m) {
+    // Marcar explicitamente cuando Filmorent ya mando una cotizacion/orden en PDF:
+    // todo lo pedido ANTES de eso ya se atendio y no debe volver a convertirse en
+    // borrador (asi es como el copiloto revivia rentas viejas ya cotizadas).
+    let idxUltimoDoc = -1;
+    const filas = msgs.map(function (m, i) {
       const who = m.traffic === 'incoming' ? 'CLIENTE' : 'FILMORENT';
-      let t = m.message && m.message.text;
-      if (!t) t = '[' + ((m.message && m.message.type) || 'adjunto') + ']';
+      const msg = m.message || {};
+      let t = msg.text;
+      if (!t && msg.type === 'attachment') {
+        const att = msg.attachment || {};
+        const nombre = String(att.fileName || '').toLowerCase();
+        const esDoc = att.type === 'file' || /invoice|cotiza|orden|pro_forma|proforma|\.pdf/.test(nombre);
+        if (who === 'FILMORENT' && esDoc) {
+          idxUltimoDoc = i;
+          t = '[FILMORENT LE ENVIO UN DOCUMENTO (cotizacion/orden): ' + (att.fileName || 'documento') + ']';
+        } else {
+          t = '[' + (att.type || 'adjunto') + ']';
+        }
+      }
+      if (!t) t = '[' + (msg.type || 'adjunto') + ']';
       return who + ': ' + String(t).replace(/\s+/g, ' ').slice(0, 300);
-    }).join('\n').slice(-8000);
+    });
+    if (idxUltimoDoc >= 0 && idxUltimoDoc < filas.length - 1) {
+      filas.splice(idxUltimoDoc + 1, 0,
+        '--- TODO LO DE ARRIBA YA SE ATENDIO (Filmorent ya envio el documento). ' +
+        'SOLO lo de aqui para abajo puede estar pendiente. ---');
+    }
+    const transcript = filas.join('\n').slice(-8000);
 
     if (!transcript) {
       return res.status(422).json({ ok: false, error: 'conversacion vacia' });
@@ -2592,9 +2614,11 @@ app.post('/webhook/draft-order', async (req, res) => {
       'Ejemplo: "dos FX3 para manana" + "una FX6 para el miercoles" = DOS solicitudes.\n' +
       'Un estudio por bloques ("3 dias de 4 horas cada dia") = UNA solicitud POR DIA, cada una con su horario.\n' +
       'Solo van juntos en la MISMA solicitud los equipos que se recogen y regresan en las MISMAS fechas.\n\n' +
-      'QUE INCLUIR: solo lo que sigue PENDIENTE de la conversacion. Si Filmorent ya le mando la orden, ' +
-      'la cotizacion o el link de pago de algo, ESO YA ESTA HECHO: NO lo repitas. Tampoco incluyas lo que ' +
-      'solo pregunto por precio y descarto, ni lo de semanas pasadas ya resuelto.\n' +
+      'QUE INCLUIR: SOLO lo pendiente. Si en la conversacion aparece la linea ' +
+      '"TODO LO DE ARRIBA YA SE ATENDIO", ignora por completo lo que este ARRIBA de esa linea: ' +
+      'ya se cotizo y ya se le mando. Tampoco incluyas lo que solo pregunto por precio y descarto. ' +
+      'Ante la duda de si algo ya se atendio, DEJALO FUERA: es mas facil que el equipo agregue una ' +
+      'linea que darse cuenta de que sobra una orden.\n' +
       'Fechas relativas ("este viernes", "el fin") se calculan con la fecha de HOY. cantidad default 1. ' +
       'Si no hay nada pendiente que rentar, solicitudes = [].';
 
