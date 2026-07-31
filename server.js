@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.13.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.13.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2843,10 +2843,16 @@ app.post('/webhook/draft-order', async (req, res) => {
         s.equipos.filter(function (x) { return x && x.descripcion; }).length;
     }).slice(0, 6);
     if (!solicitudes.length) {
-      await draftPostComment(contactId,
-        '\ud83e\udd16 Borrador de orden: no encontre nada PENDIENTE que rentar en esta conversacion ' +
-        '(puede ser que ya se le haya mandado la orden). Si falta algo, crealo a mano en Booqable.');
-      return res.json({ ok: false, error: 'sin equipos pendientes detectados' });
+      const l = ['\ud83e\udd16 No cree ningun borrador: no hay nada pendiente en esta conversacion.'];
+      if (yaPedido.length) {
+        l.push('Lo que pidio ya esta levantado:');
+        yaPedido.slice(0, 5).forEach(function (y) { l.push('  ' + y); });
+        l.push('Si falta algo o hay que moverle a esas ordenes, hazlo en Booqable.');
+      } else {
+        l.push('No detecte equipo claro que el cliente quiera rentar. Si falta algo, crealo a mano.');
+      }
+      await draftPostComment(contactId, l.join('\n'));
+      return res.json({ ok: false, error: 'sin equipos pendientes detectados', ya_pedido: yaPedido });
     }
 
     // 3) Helpers de fechas/horas.
