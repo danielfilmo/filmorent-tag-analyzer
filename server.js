@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.3', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.9.4', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2466,18 +2466,26 @@ async function draftPostComment(contactId, text) {
 // Grande" primero.) Sin match confiable regresa null: mejor "agregar a mano"
 // que adivinar un producto equivocado.
 async function draftFindProduct(query) {
+  // Sin parentesis ni comillas: "Estudio X (salon para 15)" -> "Estudio X"
+  query = String(query || '').replace(/\([^)]*\)/g, ' ').replace(/["']/g, ' ');
   const norm = function (s) {
     return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   };
   const contienePalabra = function (texto, w) {
     const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp('(^|[^a-z0-9])' + esc + '($|[^a-z0-9])').test(texto);
+    if (new RegExp('(^|[^a-z0-9])' + esc + '($|[^a-z0-9])').test(texto)) return true;
+    // Palabras largas pegadas: "filmogrand" debe encontrar "Filmo Grand".
+    // Solo >=6 chars para no reabrir "grand" vs "Grande".
+    return w.length >= 6 && texto.replace(/\s+/g, '').indexOf(w) !== -1;
   };
   const genericas = ['luz', 'luces', 'lampara', 'camara', 'lente', 'equipo', 'kit', 'de', 'para', 'con', 'el', 'la', 'un', 'una'];
   const words = norm(query).split(/\s+/).filter(function (w) { return w.length > 1; });
   const significativas = words.filter(function (w) { return genericas.indexOf(w) === -1; });
   const intentos = [words];
   if (significativas.length && significativas.length < words.length) intentos.push(significativas);
+  // Ultimo intento: las primeras 2 palabras significativas — la gente nombra el
+  // equipo al inicio ("Estudio FilmoGrand para taller de casting").
+  if (significativas.length > 2) intentos.push(significativas.slice(0, 2));
   for (const setPalabras of intentos) {
     let d;
     try {
@@ -2544,7 +2552,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       'HOY es ' + hoyMty + ' (zona America/Monterrey).\n\n' +
       'CONVERSACION (CLIENTE = el cliente, FILMORENT = nuestro equipo o el bot):\n' + transcript + '\n\n' +
       'Regresa UNICAMENTE un objeto JSON valido, sin markdown ni texto extra:\n' +
-      '{"equipos":[{"descripcion":"equipo tal como lo pidio, ej: Sony FX3, DJI Mini 4 Pro, luz Amaran 200x","cantidad":1}],' +
+      '{"equipos":[{"descripcion":"nombre CORTO del equipo, MAXIMO 5 palabras, SIN parentesis ni detalles (esos van en notas), ej: Sony FX3, DJI Mini 4 Pro, luz Amaran 200x. Para estudios usa exactamente: Estudio Filmo Grand, Estudio Filmo Pocket o Estudio Podcast","cantidad":1}],' +
       '"fecha_inicio":"YYYY-MM-DD o null","fecha_fin":"YYYY-MM-DD o null",' +
       '"notas":"detalles utiles para el equipo (horarios, entrega, proyecto, dudas abiertas); breve",' +
       '"confianza":"alta|media|baja"}\n\n' +
@@ -2622,9 +2630,18 @@ app.post('/webhook/draft-order', async (req, res) => {
     }
     if (!customerId && !clientesEmpatados.length && nombreContacto) {
       try {
-        const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(nombreContacto) + '&page[size]=1');
-        const c = (cd.data || [])[0];
-        if (c) clienteSugerido = c.attributes && c.attributes.name;
+        const cd = await booqableGet('/customers?filter[q]=' + encodeURIComponent(nombreContacto) + '&page[size]=3');
+        const normSug = function (s) {
+          return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        };
+        // filter[q] por nombre regresa cualquier cosa: solo sugerimos si el
+        // candidato comparte al menos una palabra real con el nombre del contacto.
+        const palabrasContacto = normSug(nombreContacto).split(/\s+/).filter(function (w) { return w.length > 2; });
+        const c = (cd.data || []).find(function (x) {
+          const n = normSug(x.attributes && x.attributes.name);
+          return palabrasContacto.some(function (w) { return n.indexOf(w) !== -1; });
+        });
+        if (c) clienteSugerido = c.attributes.name;
       } catch (e) { /* sin sugerencia */ }
     }
 
