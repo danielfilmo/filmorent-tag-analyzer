@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.16.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.16.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -3132,7 +3132,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       // Con link directo a cada candidato: asignarlo es un clic, no una busqueda.
       const linkCliente = function (c) {
         return '  \u2022 ' + c.name + ' (' + c.ordenes + ' rentas, ultima ' + (c.ultima || 's/f') + ')' +
-          '\n    https://filmorent-sa-de-cv.booqable.com/customers/' + c.id;
+          '\n    https://filmorent-sa-de-cv.booqable.com/customers/' + c.id + '/edit'; // sin /edit sale en blanco
       };
       if (candidatos.length > 1) {
         lineaCliente = 'Cliente: SIN ASIGNAR — este contacto tiene ' + candidatos.length +
