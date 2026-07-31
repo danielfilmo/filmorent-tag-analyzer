@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.15.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.16.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2720,10 +2720,31 @@ app.post('/webhook/draft-order', async (req, res) => {
 
     let customerId = null;
     let customerName = null;
+    let clienteAprendido = false;
     if (candidatos.length === 1 && candidatos[0].porTelefono &&
         (!nombreContacto || compartePalabra(nombreContacto, candidatos[0].name))) {
       customerId = candidatos[0].id;
       customerName = candidatos[0].name;
+    }
+    // APRENDER DE LA DECISION DEL HUMANO: si en una orden anterior de ESTA
+    // conversacion ya alguien asigno cliente, se usa el mismo. Asi el equipo
+    // contesta "¿a nombre de quien?" UNA vez y no en cada borrador.
+    if (!customerId) {
+      try {
+        const prev = await booqableGet('/orders?filter[tag_list]=' +
+          encodeURIComponent('wa-' + contactId) + '&sort=-number&page[size]=10');
+        const conCliente = (prev.data || []).find(function (o) {
+          return o.attributes && o.attributes.customer_id && o.attributes.status !== 'canceled';
+        });
+        if (conCliente) {
+          customerId = conCliente.attributes.customer_id;
+          const cd = await booqableGet('/customers/' + customerId);
+          customerName = cd.data.attributes.name;
+          clienteAprendido = true;
+          console.log('[draft-order] cliente aprendido de la orden #' +
+            conCliente.attributes.number + ': ' + customerName);
+        }
+      } catch (e) { /* sigue sin cliente */ }
     }
 
 
@@ -3100,8 +3121,10 @@ app.post('/webhook/draft-order', async (req, res) => {
 
     let lineaCliente;
     if (customerName && !patchFallo) {
-      lineaCliente = 'Cliente: ' + customerName + ' (' + (candidatos[0] ? candidatos[0].ordenes : '?') +
-        ' rentas previas). Confirma que va a ESTE cliente antes de enviar.';
+      lineaCliente = 'Cliente: ' + customerName +
+        (clienteAprendido
+          ? ' (el mismo que ustedes asignaron en una orden anterior de este chat).'
+          : ' (' + (candidatos[0] ? candidatos[0].ordenes : '?') + ' rentas previas). Confirma que va a ESTE cliente antes de enviar.');
     } else if (customerName && patchFallo) {
       lineaCliente = '⚠️ Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
         customerName + '" — asignalo a mano (y ponle el tag borrador-ai).';
@@ -3189,6 +3212,7 @@ app.post('/webhook/draft-order', async (req, res) => {
         };
       }),
       cliente: customerName || null,
+      cliente_aprendido: clienteAprendido,
       candidatos: candidatos,
       preguntas: preguntasUnicas,
       duplicado_de: previo && (ahora - previo.at) < 6 * 3600 * 1000 ? previo.numbers : null
