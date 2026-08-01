@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.16.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.18.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2067,6 +2067,19 @@ app.post('/rewards/pagar', async (req, res) => {
     if (oa.status === 'canceled') {
       return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' esta cancelada' });
     }
+    // Términos §4: el crédito aplica solo en rentas NUEVAS, antes de facturar y
+    // pagar — no en rentas en curso, ya devueltas o ya pagadas. El documento lo
+    // prometía y el server solo rechazaba canceladas (review 31-jul-2026).
+    if (oa.status === 'started' || oa.status === 'stopped') {
+      return res.status(409).json({
+        ok: false,
+        error: 'la orden #' + orderNumber + (oa.status === 'started' ? ' ya esta en curso' : ' ya termino') +
+          ': el credito aplica solo en rentas nuevas, antes de facturar'
+      });
+    }
+    if (oa.payment_status === 'paid') {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el credito se aplica antes del pago' });
+    }
     const totalWithTax = oa.grand_total_with_tax_in_cents || 0;
     if (totalWithTax < reward.credito_cents * 2) {
       return res.status(409).json({
@@ -2184,6 +2197,12 @@ app.post('/rewards/atribuir', async (req, res) => {
     if (rewardsStaffDenied(res, staff)) return;
     quienRegistra = staff;
   }
+  // La vista previa es herramienta del MOSTRADOR (con staff autenticado). En
+  // self-service sería un oráculo silencioso: consultar titulares de órdenes
+  // sin dejar rastro en el Ledger (review 31-jul-2026).
+  if (body.preview && selfService) {
+    return res.status(403).json({ ok: false, error: 'la vista previa es solo del mostrador' });
+  }
   const orderNumber = parseInt(body.order_number, 10);
   if (!Number.isFinite(orderNumber)) return res.status(400).json({ ok: false, error: 'order_number invalido' });
   if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'atribuciones deshabilitadas (Ledger no configurado)' });
@@ -2255,6 +2274,30 @@ app.post('/rewards/atribuir', async (req, res) => {
       const td = await booqableGet('/customers/' + oa.customer_id);
       titularNombre = rewardsCleanName((td.data.attributes || {}).name);
     } catch (e3) { /* informativo */ }
+
+    // 4.5) PREVIEW: el mostrador enseña los dos nombres juntos y pide confirmar
+    // ANTES de escribir nada. En la prueba con el equipo (31-jul-2026) se atribuyó
+    // una orden de práctica a un cliente real sin querer: la pantalla nunca puso
+    // enfrente "la renta es de X → los puntos van a Y".
+    if (body.preview) {
+      let yaDe = null;
+      try {
+        const q = await fetch(REWARDS_SHEETS_URL + '?action=atribucion&order_number=' + orderNumber,
+          { redirect: 'follow' }).then(r2 => r2.json());
+        if (q && q.found) yaDe = (q.atribucion || {}).beneficiario || 'otra cuenta';
+      } catch (e5) { /* si el Ledger no responde, el POST real lo vuelve a checar */ }
+      return res.json({
+        ok: true,
+        preview: true,
+        order_number: orderNumber,
+        puntos: puntos,
+        monto_mxn: baseCents / 100,
+        beneficiario: rewardsCleanName((beneficiario.attributes || {}).name),
+        beneficiario_email: (beneficiario.attributes || {}).email || '',
+        titular: titularNombre,
+        ya_atribuida_a: yaDe
+      });
+    }
 
     // 5) registrar en el Ledger (rechaza si la orden ya tiene dueño de puntos)
     const wrote = await fetch(REWARDS_SHEETS_URL, {
