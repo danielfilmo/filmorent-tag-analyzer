@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.18.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.19.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2543,19 +2543,24 @@ async function draftFindProduct(query) {
   if (significativas.length > 2) queries.push(significativas.slice(0, 2).join(' '));
   const vistos = {};
   const candidatos = [];
+  // Se buscan BUNDLES y productos. Los bundles ("Kit Camara Sony A6400 con
+  // baterias, cargador y SD") son lo que el equipo agenda de verdad: reservar el
+  // producto suelto deja fuera baterias, cargador y memoria (queja de Barush).
   for (const q of queries) {
     if (!q || vistos['q:' + q]) continue;
     vistos['q:' + q] = 1;
-    let d;
-    try {
-      d = await booqableGet('/product_groups?filter[q]=' + encodeURIComponent(q) + '&page[size]=50');
-    } catch (e) { continue; }
-    (d.data || []).forEach(function (x) {
-      if (x.attributes && !x.attributes.archived && !vistos[x.id]) {
+    for (const recurso of ['bundles', 'product_groups']) {
+      let d;
+      try {
+        d = await booqableGet('/' + recurso + '?filter[q]=' + encodeURIComponent(q) + '&page[size]=50');
+      } catch (e) { continue; }
+      (d.data || []).forEach(function (x) {
+        if (!x.attributes || x.attributes.archived || vistos[x.id]) return;
         vistos[x.id] = 1;
+        x.esBundle = (recurso === 'bundles');
         candidatos.push(x);
-      }
-    });
+      });
+    }
   }
   if (!candidatos.length) return null;
 
@@ -2585,19 +2590,39 @@ async function draftFindProduct(query) {
   if (significativas.length > 2) niveles.push(significativas.slice(0, 2));
   // OJO: NO se agrega un nivel con solo el numero. "amaran 300" caia a ["300"]
   // y traia "Lampara de tungsteno Arri 300". Mejor no encontrar que inventar.
+  // Pedido GENERICO = ninguna palabra trae numero de modelo ("un tripie", "una luz").
+  // Ahi el catalogo tiene 8+ opciones validas y elegir sola es como cayo un
+  // "Tripie People" (fuera de tienda, medio danado, solo para el prompter) en una
+  // orden real. En ese caso NO se elige: se le pregunta al equipo.
+  const esGenerico = !significativas.some(function (w) { return /\d/.test(w); });
   for (const setPalabras of niveles) {
     if (!setPalabras.length) continue;
-    const exactos = candidatos.filter(function (x) {
+    let exactos = candidatos.filter(function (x) {
       const n = norm(x.attributes.name);
       return setPalabras.every(function (w) { return contienePalabra(n, w); });
     });
     if (!exactos.length) continue;
-    exactos.sort(function (a, b) { return a.attributes.name.length - b.attributes.name.length; });
+    // Lo que no se publica en la tienda no se ofrece solo (equipo interno,
+    // danado o de uso especifico). Solo se usa si NO hay nada publicado.
+    const enTienda = exactos.filter(function (x) { return x.attributes.show_in_store !== false; });
+    if (enTienda.length) exactos = enTienda;
+    if (esGenerico && exactos.length > 1) {
+      return {
+        ambiguo: true,
+        opciones: exactos.slice(0, 6).map(function (x) { return x.attributes.name.trim(); })
+      };
+    }
+    // Con todo lo demas igual, el KIT le gana al producto suelto.
+    exactos.sort(function (a, b) {
+      if (!!b.esBundle !== !!a.esBundle) return b.esBundle ? 1 : -1;
+      return a.attributes.name.length - b.attributes.name.length;
+    });
     const g = exactos[0];
+    if (g.esBundle) return { groupName: g.attributes.name.trim(), bundleId: g.id, esBundle: true };
     try {
       const pd = await booqableGet('/products?filter[product_group_id]=' + g.id + '&page[size]=1');
       const p = (pd.data || [])[0];
-      if (p) return { groupName: g.attributes.name, productId: p.id };
+      if (p) return { groupName: g.attributes.name.trim(), productId: p.id };
     } catch (e) { /* siguiente nivel */ }
   }
   // Nada matcheo por texto. Los clientes piden el equipo como ELLOS lo conocen
@@ -2624,12 +2649,11 @@ async function draftFindProduct(query) {
       const n = parseInt((claudeText(resp).match(/\d+/) || ['0'])[0], 10);
       if (n >= 1 && n <= lista.length) {
         const g = lista[n - 1];
+        console.log('[draft-order] "' + query + '" -> "' + g.attributes.name + '" (elegido por IA)');
+        if (g.esBundle) return { groupName: g.attributes.name.trim(), bundleId: g.id, esBundle: true, porIA: true };
         const pd = await booqableGet('/products?filter[product_group_id]=' + g.id + '&page[size]=1');
         const p = (pd.data || [])[0];
-        if (p) {
-          console.log('[draft-order] "' + query + '" -> "' + g.attributes.name + '" (elegido por IA)');
-          return { groupName: g.attributes.name, productId: p.id, porIA: true };
-        }
+        if (p) return { groupName: g.attributes.name.trim(), productId: p.id, porIA: true };
       }
     } catch (e) { console.error('[draft-order] desempate IA: ' + e.message); }
   }
@@ -3030,11 +3054,13 @@ app.post('/webhook/draft-order', async (req, res) => {
       // que el cliente YA tiene y no se crean ordenes vacias.
       const resueltos = [];
       const noEncontrados = [];
+      const ambiguos = [];
       const omitidos = Math.max(0, equipos.length - 12);
       for (const eq of equipos.slice(0, 12)) {
         const qty = Math.max(1, parseInt(eq.cantidad, 10) || 1);
         const hit = await draftFindProduct(eq.descripcion);
         if (!hit) { noEncontrados.push(eq.descripcion); continue; }
+        if (hit.ambiguo) { ambiguos.push({ pedido: eq.descripcion, opciones: hit.opciones }); continue; }
         resueltos.push({ pedido: eq.descripcion, qty: qty, hit: hit });
       }
 
@@ -3055,6 +3081,16 @@ app.post('/webhook/draft-order', async (req, res) => {
           return seTraslapan && v.items.some(function (t) { return claveProd(t) === clave; });
         });
         if (ya) choques.push({ producto: r.hit.groupName, orden: ya });
+      }
+      if (!resueltos.length && ambiguos.length) {
+        // Todo lo que pidio es generico: no se crea orden, se pregunta cual.
+        resultados.push({
+          orderId: null, number: null, agregados: [], noEncontrados: noEncontrados,
+          fallaronReserva: [], ambiguos: ambiguos, omitidos: omitidos, totalPedido: equipos.length,
+          fi: fi, ff: ff, hIni: hIni, hReg: hReg, fechasAsumidas: fechasAsumidas,
+          sinHora: false, domingo: false, soloPreguntas: true
+        });
+        continue;
       }
       if (choques.length && choques.length === resueltos.length) {
         conflictos.push({
@@ -3094,16 +3130,14 @@ app.post('/webhook/draft-order', async (req, res) => {
       const fallaronReserva = [];
       for (const r of resueltos) {
         try {
+          const accion = r.hit.esBundle
+            ? { action: 'book_bundle', bundle_id: r.hit.bundleId, quantity: r.qty }
+            : { action: 'book_product', mode: 'create_new', product_id: r.hit.productId, quantity: r.qty };
           await booqableWrite('POST', '/order_fulfillments', {
-            data: {
-              type: 'order_fulfillments',
-              attributes: {
-                order_id: orderId,
-                actions: [{ action: 'book_product', mode: 'create_new', product_id: r.hit.productId, quantity: r.qty }]
-              }
-            }
+            data: { type: 'order_fulfillments', attributes: { order_id: orderId, actions: [accion] } }
           });
           agregados.push(r.pedido + ' -> ' + r.hit.groupName + (r.qty > 1 ? ' x' + r.qty : '') +
+            (r.hit.esBundle ? ' [KIT completo]' : '') +
             (r.hit.porIA ? ' (?? verifica: el nombre no coincidia exacto)' : ''));
         } catch (e) {
           console.error('[draft-order] book ' + r.hit.groupName + ': ' + e.message);
@@ -3136,6 +3170,7 @@ app.post('/webhook/draft-order', async (req, res) => {
         orderId: orderId, number: orderNumber, agregados: agregados, noEncontrados: noEncontrados,
         fallaronReserva: fallaronReserva, omitidos: omitidos, totalPedido: equipos.length,
         parcialmenteRepetida: choques.length ? choques.map(function (c) { return c.producto + ' ya esta en #' + c.orden.number; }) : [],
+        ambiguos: ambiguos,
         fi: fi, ff: ff, hIni: hIni, hReg: hReg, fechasAsumidas: fechasAsumidas,
         sinHora: !validaHora(sol.hora_inicio) && !fechasAsumidas,
         horarioEstudioAsumido: horarioEstudioAsumido,
@@ -3220,13 +3255,22 @@ app.post('/webhook/draft-order', async (req, res) => {
 
     for (const r of resultados) {
       detalle.push('');
-      detalle.push((r.number ? '#' + r.number : '(sin numero)') + ' — recoge ' + r.fi + ' ' + r.hIni +
+      detalle.push((r.number ? '#' + r.number : (r.soloPreguntas ? '(NO se creo orden, falta definir el equipo)' : '(sin numero)')) +
+        ' — recoge ' + r.fi + ' ' + r.hIni +
         ', regresa ' + r.ff + ' ' + r.hReg + (r.fechasAsumidas ? ' (FECHAS ASUMIDAS)' : ''));
       if (r.agregados.length) detalle.push('  Equipo: ' + r.agregados.join(' | '));
       if (r.parcialmenteRepetida && r.parcialmenteRepetida.length) {
         detalle.push('  ⚠️ Repetido: ' + r.parcialmenteRepetida.join('; '));
         preguntas.push('Ya tienes apartado ' + r.parcialmenteRepetida[0].split(' ya esta')[0] +
           ' para esas fechas. ¿Es una orden NUEVA, es la misma, o le movemos a la que ya tienes?');
+      }
+      if (r.ambiguos && r.ambiguos.length) {
+        r.ambiguos.forEach(function (a) {
+          detalle.push('  ⚠️ "' + a.pedido + '" es muy general, hay varios: ' + a.opciones.join(' / ') +
+            '. NO elegi ninguno, agregalo tu.');
+          preguntas.push('Sobre el ' + a.pedido + ': manejamos varias opciones (' +
+            a.opciones.slice(0, 3).join(', ') + '). ¿Cual necesitas o para que lo vas a usar?');
+        });
       }
       if (r.noEncontrados.length) detalle.push('  ⚠️ NO encontre en catalogo: ' + r.noEncontrados.join(', '));
       if (r.fallaronReserva.length) detalle.push('  ⚠️ Encontrados pero NO agregados: ' + r.fallaronReserva.join(', '));
@@ -3252,7 +3296,7 @@ app.post('/webhook/draft-order', async (req, res) => {
         // encargado (dato de Daniel, 30-jul; pendiente confirmar monto con el equipo).
         detalle.push('  \u26a0\ufe0f Cae en DOMINGO: confirma disponibilidad y si aplica cargo de encargado.');
       }
-      detalle.push('  https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
+      if (r.orderId) detalle.push('  https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
     }
 
     const hayEstudio = resultados.some(function (r) {
