@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.21.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.22.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2230,6 +2230,102 @@ app.post('/rewards/pagar', async (req, res) => {
   } catch (e) {
     console.error('[rewards] pagar error: ' + e.message);
     return res.status(502).json({ ok: false, error: 'error aplicando el credito, intenta de nuevo' });
+  }
+});
+
+// ── POST /rewards/hitos-diarios?key=... ─────────────────────
+// Motor de avisos por HITOS (decisión de Daniel 1-ago-2026: WhatsApp solo cuando
+// pasa algo que le importa al cliente — cruzó un escalón de canje o subió de
+// nivel; NUNCA recibo por cada renta, le preocupa la intromisión). Lo dispara
+// un trigger diario del Apps Script del Ledger (cuenta info@). Idempotente vía
+// tab Notificaciones (tipo:'notif' con clave única). Mientras no exista la
+// plantilla aprobada de Meta corre en DRY-RUN: registra lo que MANDARÍA.
+// Encender con env REWARDS_HITOS_LIVE=1 cuando la plantilla esté aprobada.
+app.post('/rewards/hitos-diarios', async (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || req.query.key !== process.env.REWARDS_HITOS_KEY) {
+    return res.status(401).json({ ok: false, error: 'key invalida' });
+  }
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'Ledger no configurado' });
+  const live = process.env.REWARDS_HITOS_LIVE === '1';
+  try {
+    // "ayer" en horario de Monterrey (UTC-6)
+    const ahoraMty = new Date(Date.now() - 6 * 3600 * 1000);
+    const ayer = new Date(ahoraMty.getTime() - 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const recientes = [];
+    for (let page = 1; page <= 3; page++) {
+      const od = await booqableGet('/orders?sort=-number&page[size]=100&page[number]=' + page);
+      recientes.push(...(od.data || []));
+    }
+    const deAyer = recientes.filter(o => {
+      const a = o.attributes || {};
+      if (a.status === 'draft' || a.status === 'concept' || a.status === 'canceled') return false;
+      return String(a.starts_at || '').slice(0, 10) === ayer;
+    });
+    const clientes = [...new Set(deAyer.map(o => (o.attributes || {}).customer_id).filter(Boolean))]
+      .filter(cid => !REWARDS_EXCLUDED_CUSTOMER_IDS.has(cid))
+      .slice(0, 40);
+
+    const hitos = [];
+    for (const cid of clientes) {
+      try {
+        const earned = await rewardsComputeEarned(cid);
+        const ledger = await rewardsLedgerSummary(cid);
+        if (!ledger) continue;
+        const ganadas = (ledger.atribuciones_ganadas || []).reduce((s2, x) => s2 + (Number(x.puntos) || 0), 0);
+        const cedidas = (ledger.atribuciones_cedidas || []).reduce((s2, x) => s2 + (Number(x.puntos) || 0), 0);
+        const dispAhora = Math.max(0, earned.points_earned + ganadas - cedidas - ledger.redeemed_points);
+        const ordenesAyer = earned.orders.filter(o => String(o.starts_at || '').slice(0, 10) === ayer);
+        const ptsAyer = ordenesAyer.reduce((s2, o) => s2 + (o.points || 0), 0);
+        if (ptsAyer <= 0) continue;
+        const dispAntes = Math.max(0, dispAhora - ptsAyer);
+        const countable = earned.orders.length;
+        const avgTicket = countable ? Math.round(earned.revenue_cents / countable) : 0;
+        const catalogo = rewardsCatalogFor(avgTicket);
+        // el escalón más alto que AYER quedó al alcance y antes no lo estaba
+        const cruzados = catalogo.filter(r => r.points > dispAntes && r.points <= dispAhora);
+        const cruzado = cruzados.length ? cruzados[cruzados.length - 1] : null;
+        // subida de nivel: nivel de hoy vs nivel sin las rentas de ayer
+        const tierAhora = rewardsTierFor(earned.revenue_12m_cents, earned.rentas_12m);
+        const baseAyer = ordenesAyer.reduce((s2, o) =>
+          s2 + Math.max(0, (o.total_cents || 0) - (o.elsepc_excluded_cents || 0)), 0);
+        const tierAntes = rewardsTierFor(
+          Math.max(0, earned.revenue_12m_cents - baseAyer),
+          Math.max(0, (earned.rentas_12m || 0) - ordenesAyer.length));
+        const cd = await booqableGet('/customers/' + cid);
+        const ca = ((cd.data || {}).attributes || {});
+        const pendientes = [];
+        if (cruzado) {
+          pendientes.push({ tipo: 'escalon', detalle: cruzado.points + 'pts=' + rewardsFormatMXN(cruzado.credito_cents) });
+        }
+        if (tierAhora.name !== tierAntes.name && (tierAhora.mult || 1) > (tierAntes.mult || 1)) {
+          pendientes.push({ tipo: 'nivel', detalle: tierAhora.name });
+        }
+        for (const h of pendientes) {
+          const wrote = await rewardsLedgerWrite({
+            tipo: 'notif',
+            clave: cid + '|' + h.tipo + '|' + h.detalle,
+            fecha: new Date().toISOString(),
+            customer_id: cid,
+            email: ca.email || '',
+            nombre: rewardsCleanName(ca.name),
+            tipo_hito: h.tipo,
+            detalle: h.detalle,
+            estado: live ? 'pendiente-envio' : 'dry-run'
+          });
+          // el Ledger contesta ok:false si la clave ya existía — no re-avisar
+          if (wrote) hitos.push({ cliente: rewardsCleanName(ca.name), email: ca.email || '', tipo: h.tipo, detalle: h.detalle, saldo: dispAhora });
+        }
+      } catch (eCli) {
+        console.error('[rewards] hitos cliente ' + cid + ': ' + eCli.message);
+      }
+    }
+    console.log('[rewards] hitos-diarios ' + ayer + ': ' + deAyer.length + ' ordenes, ' +
+      clientes.length + ' clientes, ' + hitos.length + ' hitos nuevos (' + (live ? 'LIVE' : 'dry-run') + ')');
+    return res.json({ ok: true, fecha: ayer, ordenes_ayer: deAyer.length,
+      clientes_revisados: clientes.length, hitos: hitos, live: live });
+  } catch (e) {
+    console.error('[rewards] hitos-diarios error: ' + e.message);
+    return res.status(502).json({ ok: false, error: e.message });
   }
 });
 
