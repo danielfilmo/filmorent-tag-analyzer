@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.20.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.21.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2561,6 +2561,42 @@ async function draftPostComment(contactId, text) {
   }
 }
 
+// Generado del censo de 31,690 ordenes de Booqable (3-ago-2026).
+// Que equipo se pone de verdad cuando el cliente pide algo generico.
+// Solo entradas con >=40% de las ordenes; por debajo se prefiere preguntar.
+const PREFERENCIAS = {
+  'tripie': {
+    foto:        { nombre: "Tripié Sachtler ACE M MS", conf: 49 },
+  },
+  'estabilizador': {
+    cine_grande: { nombre: "Estabilizador DJI RONIN RS4 Pro", conf: 83 },
+    cine_chica:  { nombre: "Estabilizador DJI RONIN RS4 Pro", conf: 51 },
+  },
+  'sandbag': {
+    global:      { nombre: "Sandbag - Rojo", conf: 45 },
+    foto:        { nombre: "Sandbag - Rojo", conf: 44 },
+  },
+  'extension': {
+    global:      { nombre: "Extensión (diferente medida) - 10 mts", conf: 46 },
+    cine_grande: { nombre: "Extensión (diferente medida) - 10 mts", conf: 41 },
+    cine_chica:  { nombre: "Extensión (diferente medida) - 10 mts", conf: 45 },
+    foto:        { nombre: "Extensión (diferente medida) - 10 mts", conf: 47 },
+  },
+  'cstand': {
+    global:      { nombre: "C-Stand (Century) - Negro, No Desmontable, Sin ruedas", conf: 40 },
+    foto:        { nombre: "C-Stand (Century) - Negro, No Desmontable, Sin ruedas", conf: 40 },
+  },
+};
+
+// Detecta la familia de camara del pedido para elegir el accesorio adecuado.
+function draftFamilia(textos) {
+  const t = (textos || []).join(' ').toLowerCase();
+  if (/fx6|fx9|\bred\b|scarlet|venice/.test(t)) return 'cine_grande';
+  if (/fx3|fx30|fx5/.test(t)) return 'cine_chica';
+  if (/a7|a6400|a6700|r5|r6|z6|zv-e10/.test(t)) return 'foto';
+  return null;
+}
+
 // Busca un product group por texto y regresa {groupName, productId} o null.
 // PROBLEMA CONOCIDO de filter[q] con varias palabras: regresa TODO lo que
 // matchee CUALQUIER palabra, en orden alfabetico — para "sony fx3" la camara
@@ -2570,7 +2606,7 @@ async function draftPostComment(contactId, text) {
 // contenga las palabras pedidas como PALABRA COMPLETA ("grand" != "Grande",
 // "fx3" != "FX30"). Sin match confiable regresa null: mejor "agregar a mano"
 // que adivinar un producto equivocado.
-async function draftFindProduct(query) {
+async function draftFindProduct(query, contexto) {
   query = String(query || '').replace(/\([^)]*\)/g, ' ').replace(/["']/g, ' ');
   const norm = function (s) {
     return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -2662,6 +2698,28 @@ async function draftFindProduct(query) {
     const enTienda = exactos.filter(function (x) { return x.attributes.show_in_store !== false; });
     if (enTienda.length) exactos = enTienda;
     if (esGenerico && exactos.length > 1) {
+      // Antes de rendirse: ¿que pone el equipo de verdad en estos casos?
+      // (censo de 31,690 ordenes de Booqable). Si el historial es claro se usa
+      // ese y se DICE el porcentaje; si esta repartido, se pregunta.
+      const cat = Object.keys(PREFERENCIAS).find(function (c) {
+        return significativas.some(function (w) { return w.indexOf(c.slice(0, 6)) === 0 || c.indexOf(w) === 0; });
+      });
+      const fam = draftFamilia(contexto);
+      const pref = cat ? (PREFERENCIAS[cat][fam] || PREFERENCIAS[cat].global) : null;
+      if (pref) {
+        const elegido = exactos.find(function (x) {
+          return norm(x.attributes.name).indexOf(norm(pref.nombre).slice(0, 22)) !== -1;
+        });
+        if (elegido) {
+          const salida = { groupName: elegido.attributes.name.trim(), porHistorial: pref.conf };
+          if (elegido.esBundle) { salida.bundleId = elegido.id; salida.esBundle = true; return salida; }
+          try {
+            const pd = await booqableGet('/products?filter[product_group_id]=' + elegido.id + '&page[size]=1');
+            const p = (pd.data || [])[0];
+            if (p) { salida.productId = p.id; return salida; }
+          } catch (e) { /* cae a preguntar */ }
+        }
+      }
       return {
         ambiguo: true,
         opciones: exactos.slice(0, 6).map(function (x) { return x.attributes.name.trim(); })
@@ -3113,7 +3171,8 @@ app.post('/webhook/draft-order', async (req, res) => {
       const omitidos = Math.max(0, equipos.length - 12);
       for (const eq of equipos.slice(0, 12)) {
         const qty = Math.max(1, parseInt(eq.cantidad, 10) || 1);
-        const hit = await draftFindProduct(eq.descripcion);
+        const hit = await draftFindProduct(eq.descripcion,
+          equipos.map(function (x) { return x.descripcion; }));
         if (!hit) { noEncontrados.push(eq.descripcion); continue; }
         if (hit.ambiguo) { ambiguos.push({ pedido: eq.descripcion, opciones: hit.opciones }); continue; }
         resueltos.push({ pedido: eq.descripcion, qty: qty, hit: hit });
@@ -3193,6 +3252,7 @@ app.post('/webhook/draft-order', async (req, res) => {
           });
           agregados.push(r.pedido + ' -> ' + r.hit.groupName + (r.qty > 1 ? ' x' + r.qty : '') +
             (r.hit.esBundle ? ' [KIT completo]' : '') +
+            (r.hit.porHistorial ? ' (el que se pone en el ' + r.hit.porHistorial + '% de estos casos)' : '') +
             (r.hit.porIA ? ' (?? verifica: el nombre no coincidia exacto)' : ''));
         } catch (e) {
           console.error('[draft-order] book ' + r.hit.groupName + ': ' + e.message);
