@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.19.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.20.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1436,11 +1436,24 @@ function rewardsCatalogFor(avgTicketCents) {
 // min en centavos SIN IVA de revenue rodante de 12 meses (base ya sin
 // exclusiones). Censo 24-jul: Plata $20k+/año = 57 clientes (top 5% de 1,114
 // activos), Oro $100k+/año = 5 clientes.
+// Rediseño 1-ago-2026 (decisión de Daniel con pronóstico): el beneficio de nivel
+// es MULTIPLICADOR de puntos, no descuento % (el 5/10% costaba ~$188k/año
+// incondicionales; el multiplicador ~$32k condicionados a que el cliente regrese).
+// Regla DUAL de calificación (tipo aerolínea): por pesos O por # de rentas.
+// discount queda en 0 por compatibilidad con el portal (ya no existe descuento
+// permanente ni la regla "aplica el mayor").
 const REWARDS_TIERS = [
-  { name: 'Bronce', min_12m_cents: 0, discount: 0 },
-  { name: 'Plata', min_12m_cents: 2000000, discount: 5 },   // $20,000 MXN/año
-  { name: 'Oro', min_12m_cents: 10000000, discount: 10 }    // $100,000 MXN/año
+  { name: 'Bronce', min_12m_cents: 0, min_rentas_12m: null, mult: 1, discount: 0 },
+  { name: 'Plata', min_12m_cents: 2000000, min_rentas_12m: 8, mult: 1.5, discount: 0 },    // $20k O 8+ rentas
+  { name: 'Oro', min_12m_cents: 10000000, min_rentas_12m: 24, oro_piso_cents: 5000000, mult: 2, discount: 0 } // $100k O (24+ rentas Y $50k)
 ];
+// Renta mínima para CONTAR en la vía de frecuencia: $750 sin IVA (con $500 entraban
+// 26 clientes de ticket muy chico; con $1,000 la vía moría con 1 solo cliente —
+// medido contra Booqable real el 1-ago-2026). Además 1 renta por rango de fechas.
+const REWARDS_RENTA_MIN_CENTS = 75000;
+// El multiplicador aplica SOLO a rentas desde el lanzamiento; lo retroactivo va a 1x
+// (no regalarle miles de puntos de golpe a los Oro).
+const REWARDS_MULT_DESDE = '2026-08-01';
 
 // Cuentas que NO participan en el programa (decisión de Daniel 24-jul-2026):
 // socios/internos. No aparecen en /member, /redeem, /pagar ni en el índice QR.
@@ -1570,10 +1583,14 @@ function rewardsQrCode(customerId) {
   return 'FLM-' + a + b + '-' + year + '-' + c + n + d + e;
 }
 
-function rewardsTierFor(revenue12mCents) {
-  for (let i = REWARDS_TIERS.length - 1; i >= 0; i--) {
-    if (revenue12mCents >= REWARDS_TIERS[i].min_12m_cents) return REWARDS_TIERS[i];
-  }
+// Regla dual: pesos O rentas. Para Oro la vía de frecuencia exige además un piso
+// de pesos ($50k) — que nadie llegue a Oro rentando 30 veces tarjetas SD.
+function rewardsTierFor(revenue12mCents, rentas12m) {
+  const r = rentas12m || 0;
+  const oro = REWARDS_TIERS[2], plata = REWARDS_TIERS[1];
+  if (revenue12mCents >= oro.min_12m_cents ||
+      (r >= oro.min_rentas_12m && revenue12mCents >= oro.oro_piso_cents)) return oro;
+  if (revenue12mCents >= plata.min_12m_cents || r >= plata.min_rentas_12m) return plata;
   return REWARDS_TIERS[0];
 }
 
@@ -1654,40 +1671,75 @@ async function rewardsComputeEarned(customerId) {
   // (starts_at) o de creación si no la hay
   const cutoff12m = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString();
   let revenue12mCents = 0;
-  const orderRows = countable.map(o => {
+  const pre = countable.map(o => {
     const a = o.attributes || {};
     const g = a.grand_total_in_cents || 0;
     const gt = a.grand_total_with_tax_in_cents || 0;
     const elWithTax = elsepcByOrder[o.id] || 0;
     const ratio = gt ? (g / gt) : 1;
     const elBase = Math.min(Math.round(elWithTax * ratio), g);
-    totalBaseCents += g;
-    totalElsepcCents += elBase;
-    if (String(a.starts_at || a.created_at || '') >= cutoff12m) {
-      revenue12mCents += Math.max(0, g - elBase);
+    return { o, a, g, gt, elBase, base: Math.max(0, g - elBase),
+      fecha: String(a.starts_at || a.created_at || '') };
+  });
+
+  // Multiplicador por orden = nivel VIGENTE AL MOMENTO de esa renta (ventana de
+  // 12 meses ANTES de la renta, regla dual). Solo rentas desde REWARDS_MULT_DESDE;
+  // lo anterior (incluido lo retroactivo del lanzamiento) queda a 1x. Así los
+  // puntos ya ganados nunca se devalúan si el cliente baja de nivel.
+  const rangoDe = a2 => String(a2.starts_at || '').slice(0, 10) + '|' + String(a2.stops_at || '').slice(0, 10);
+  const asc = pre.slice().sort((x, y) => (x.fecha < y.fecha ? -1 : 1));
+  const multByOrderId = {};
+  for (let i = 0; i < asc.length; i++) {
+    const r = asc[i];
+    if (r.fecha.slice(0, 10) < REWARDS_MULT_DESDE) { multByOrderId[r.o.id] = 1; continue; }
+    const desde = new Date(new Date(r.fecha).getTime() - 365 * 24 * 3600 * 1000).toISOString();
+    let rev = 0;
+    const rangosPrevios = new Set();
+    for (let j = 0; j < i; j++) {
+      const p = asc[j];
+      if (p.fecha < desde) continue;
+      rev += p.base;
+      if (p.base >= REWARDS_RENTA_MIN_CENTS) rangosPrevios.add(rangoDe(p.a));
+    }
+    multByOrderId[r.o.id] = rewardsTierFor(rev, rangosPrevios.size).mult;
+  }
+
+  // rentas contables de 12m para el NIVEL actual (vía frecuencia): base >= $750
+  // y UNA por rango de fechas — partir una orden en tres no cuenta triple.
+  const rangos12m = new Set();
+  let pointsBaseMultCents = 0;
+  const orderRows = pre.map(r => {
+    totalBaseCents += r.g;
+    totalElsepcCents += r.elBase;
+    const mult = multByOrderId[r.o.id] || 1;
+    pointsBaseMultCents += Math.round(r.base * mult);
+    if (r.fecha >= cutoff12m) {
+      revenue12mCents += r.base;
+      if (r.base >= REWARDS_RENTA_MIN_CENTS) rangos12m.add(rangoDe(r.a));
     }
     return {
-      id: o.id,
-      number: a.number,
-      status: a.status,
-      total_cents: g,
-      total_with_tax_cents: gt,
-      elsepc_excluded_cents: elBase,
-      points: Math.floor((g - elBase) / 100 / 100),
-      item_count: a.item_count || 0,
-      starts_at: a.starts_at,
-      stops_at: a.stops_at,
-      created_at: a.created_at
+      id: r.o.id,
+      number: r.a.number,
+      status: r.a.status,
+      total_cents: r.g,
+      total_with_tax_cents: r.gt,
+      elsepc_excluded_cents: r.elBase,
+      points: Math.floor((r.base / 100 / 100) * mult),
+      mult: mult,
+      item_count: r.a.item_count || 0,
+      starts_at: r.a.starts_at,
+      stops_at: r.a.stops_at,
+      created_at: r.a.created_at
     };
   });
 
-  const pointsBaseCents = totalBaseCents - totalElsepcCents;
   return {
     orders: orderRows,
     revenue_cents: totalBaseCents,
     revenue_12m_cents: revenue12mCents,
+    rentas_12m: rangos12m.size,
     elsepc_excluded_cents: totalElsepcCents,
-    points_earned: Math.floor(pointsBaseCents / 100 / 100)
+    points_earned: Math.floor(pointsBaseMultCents / 100 / 100)
   };
 }
 
@@ -1764,7 +1816,7 @@ async function rewardsBuildMember(customer) {
   const puntosCedidos = cedidas.reduce((s, x) => s + (Number(x.puntos) || 0), 0);
   const earnedTotal = Math.max(0, earned.points_earned + puntosGanados - puntosCedidos);
   const available = Math.max(0, earnedTotal - redeemed);
-  const tier = rewardsTierFor(earned.revenue_12m_cents);
+  const tier = rewardsTierFor(earned.revenue_12m_cents, earned.rentas_12m);
   // Ticket promedio para el crédito calibrado: revenue SIN exclusiones ELSEPC
   // (el mismo que ya calcula rewardsComputeEarned) / # de órdenes contables.
   const countableOrders = earned.orders.length;
@@ -1798,7 +1850,9 @@ async function rewardsBuildMember(customer) {
     tier: {
       name: tier.name,
       discount: tier.discount,
-      base_12m_cents: earned.revenue_12m_cents
+      mult: tier.mult,
+      base_12m_cents: earned.revenue_12m_cents,
+      rentas_12m: earned.rentas_12m
     },
     orders: earned.orders,
     redemptions: ledger ? ledger.redemptions : [],
