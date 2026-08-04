@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.20.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.20.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1444,13 +1444,14 @@ function rewardsCatalogFor(avgTicketCents) {
 // permanente ni la regla "aplica el mayor").
 const REWARDS_TIERS = [
   { name: 'Bronce', min_12m_cents: 0, min_rentas_12m: null, mult: 1, discount: 0 },
-  { name: 'Plata', min_12m_cents: 2000000, min_rentas_12m: 8, mult: 1.5, discount: 0 },    // $20k O 8+ rentas
+  { name: 'Plata', min_12m_cents: 2000000, min_rentas_12m: 12, mult: 1.5, discount: 0 },   // $20k O 12+ rentas
   { name: 'Oro', min_12m_cents: 10000000, min_rentas_12m: 24, oro_piso_cents: 5000000, mult: 2, discount: 0 } // $100k O (24+ rentas Y $50k)
 ];
-// Renta mínima para CONTAR en la vía de frecuencia: $750 sin IVA (con $500 entraban
-// 26 clientes de ticket muy chico; con $1,000 la vía moría con 1 solo cliente —
-// medido contra Booqable real el 1-ago-2026). Además 1 renta por rango de fechas.
-const REWARDS_RENTA_MIN_CENTS = 75000;
+// Renta mínima para CONTAR en la vía de frecuencia: $500 sin IVA con 12+ rentas
+// (decisión de Daniel 1-ago-2026: "renta una vez al mes y eres Plata" — grupo más
+// puro, 8.5 meses activos promedio; $750/8 daba 11 clientes, $500/12 da 6).
+// Además 1 renta por rango de fechas.
+const REWARDS_RENTA_MIN_CENTS = 50000;
 // El multiplicador aplica SOLO a rentas desde el lanzamiento; lo retroactivo va a 1x
 // (no regalarle miles de puntos de golpe a los Oro).
 const REWARDS_MULT_DESDE = '2026-08-01';
