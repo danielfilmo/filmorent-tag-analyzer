@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.23.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.24.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1728,6 +1728,7 @@ async function rewardsComputeEarned(customerId) {
       points: Math.floor((r.base / 100 / 100) * mult),
       mult: mult,
       item_count: r.a.item_count || 0,
+      payment_status: r.a.payment_status || '',
       starts_at: r.a.starts_at,
       stops_at: r.a.stops_at,
       created_at: r.a.created_at
@@ -1746,14 +1747,16 @@ async function rewardsComputeEarned(customerId) {
 
 // Lee del Ledger (Apps Script doGet) los canjes de un customer.
 // Devuelve null si el Ledger no esta configurado o fallo (degradar con flag).
-async function rewardsLedgerSummary(customerId) {
+async function rewardsLedgerSummary(customerId, email) {
   if (!REWARDS_SHEETS_URL) return null;
   try {
-    const r = await fetch(REWARDS_SHEETS_URL + '?action=member&customer_id=' + encodeURIComponent(customerId), { redirect: 'follow' });
+    const r = await fetch(REWARDS_SHEETS_URL + '?action=member&customer_id=' + encodeURIComponent(customerId) +
+      (email ? '&email=' + encodeURIComponent(String(email).toLowerCase()) : ''), { redirect: 'follow' });
     if (!r.ok) return null;
     const j = await r.json().catch(() => null);
     if (!j || j.ok === false) return null;
     return {
+      exclusion: j.exclusion || null,   // tab Exclusiones: {nivel:'bloqueado'|'adeudo', motivo}
       redeemed_points: j.redeemed_points || 0,
       redemptions: j.redemptions || [],
       // 28-jul: órdenes de otros que este miembro pidió (suman) y órdenes propias
@@ -1765,6 +1768,29 @@ async function rewardsLedgerSummary(customerId) {
     console.error('rewards ledger read error: ' + e.message);
     return null;
   }
+}
+
+// ── Candado de adeudos y vetos (términos §1 y §8, decisión de Daniel 5-ago-2026) ──
+// Dos fuentes: la tab Exclusiones del Ledger (humana: la mantiene el equipo/Suheidi)
+// y el proxy de Booqable (automática: orden TERMINADA hace más de 30 días con pago
+// pendiente — medido 5-ago: 97-98% de las stopped están marcadas 'paid', así que
+// las excepciones son adeudos reales, no basura de captura). La cancelación
+// definitiva a 60 días NO es automática: la confirma Suheidi (dato irreversible).
+// Devuelve null si puede canjear, o {status, error} para responder el 409.
+function rewardsCandadoCanje(ledger, earnedOrders) {
+  const excl = ledger && ledger.exclusion;
+  if (excl && excl.nivel === 'bloqueado') {
+    return { status: 403, error: 'esta cuenta no participa en el programa por el momento; si crees que es un error, escribenos por WhatsApp' };
+  }
+  const MSG_ADEUDO = 'canje suspendido: hay un saldo por aclarar en tu cuenta — resuelvelo en mostrador o por WhatsApp y tus puntos te esperan (no se pierden)';
+  if (excl && excl.nivel === 'adeudo') return { status: 409, error: MSG_ADEUDO };
+  const hace30d = Date.now() - 30 * 86400000;
+  const vencida = (earnedOrders || []).some(o =>
+    o.status === 'stopped' &&
+    (o.payment_status === 'payment_due' || o.payment_status === 'partially_paid') &&
+    o.stops_at && new Date(o.stops_at).getTime() < hace30d);
+  if (vencida) return { status: 409, error: MSG_ADEUDO };
+  return null;
 }
 
 // Todo texto que acaba en una celda del Sheet: recortado y neutralizado contra
@@ -1805,7 +1831,7 @@ function rewardsCleanName(name) {
 async function rewardsBuildMember(customer) {
   const a = customer.attributes || {};
   const earned = await rewardsComputeEarned(customer.id);
-  const ledger = await rewardsLedgerSummary(customer.id);
+  const ledger = await rewardsLedgerSummary(customer.id, a.email);
   const redeemed = ledger ? ledger.redeemed_points : 0;
   // Atribuciones: en renta audiovisual quien ELIGE el proveedor (DP/freelance) no
   // siempre es quien PAGA (la productora). Si pidió que los puntos fueran suyos,
@@ -1830,6 +1856,9 @@ async function rewardsBuildMember(customer) {
       email: a.email || '',
       member_id: 'FLM-' + String(a.number || '0').padStart(5, '0'),
       qr_code: rewardsQrCode(customer.id),
+      // exclusión vigente (tab Exclusiones del Ledger) — el portal la ignora;
+      // el mostrador la puede mostrar para que el staff sepa el motivo
+      exclusion: (ledger && ledger.exclusion) || null,
       member_since: a.created_at,
       last_order_at: a.last_order_at || a.latest_order_at || null,
       order_count: a.order_count || 0,
@@ -1903,8 +1932,10 @@ app.post('/rewards/redeem', async (req, res) => {
     // cliente): el reward_id se valida contra el catálogo calibrado del propio
     // miembro, no contra una tabla estática.
     const earned = await rewardsComputeEarned(customer.id);
-    const ledger = await rewardsLedgerSummary(customer.id);
+    const ledger = await rewardsLedgerSummary(customer.id, (customer.attributes || {}).email);
     if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
+    const candado = rewardsCandadoCanje(ledger, earned.orders);
+    if (candado) return res.status(candado.status).json({ ok: false, error: candado.error });
     const countableOrders = earned.orders.length;
     const avgTicketCents = countableOrders ? Math.round(earned.revenue_cents / countableOrders) : 0;
     const catalog = rewardsCatalogFor(avgTicketCents);
@@ -2096,8 +2127,10 @@ app.post('/rewards/pagar', async (req, res) => {
 
     // 2) saldo + catálogo calibrado EN VIVO (no confiar en el cliente)
     const earned = await rewardsComputeEarned(customerId);
-    const ledger = await rewardsLedgerSummary(customerId);
+    const ledger = await rewardsLedgerSummary(customerId, ((customer || {}).attributes || {}).email);
     if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
+    const candadoPagar = rewardsCandadoCanje(ledger, earned.orders);
+    if (candadoPagar) return res.status(candadoPagar.status).json({ ok: false, error: candadoPagar.error });
     const countableOrders = earned.orders.length;
     const avgTicketCents = countableOrders ? Math.round(earned.revenue_cents / countableOrders) : 0;
     const reward = rewardsCatalogFor(avgTicketCents).find(r => r.id === rewardId);
@@ -2271,6 +2304,7 @@ app.post('/rewards/hitos-diarios', async (req, res) => {
         const earned = await rewardsComputeEarned(cid);
         const ledger = await rewardsLedgerSummary(cid);
         if (!ledger) continue;
+        if (ledger.exclusion) continue;   // vetados/adeudos no reciben avisos de hitos
         const ganadas = (ledger.atribuciones_ganadas || []).reduce((s2, x) => s2 + (Number(x.puntos) || 0), 0);
         const cedidas = (ledger.atribuciones_cedidas || []).reduce((s2, x) => s2 + (Number(x.puntos) || 0), 0);
         const dispAhora = Math.max(0, earned.points_earned + ganadas - cedidas - ledger.redeemed_points);
