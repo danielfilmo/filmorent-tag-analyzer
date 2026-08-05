@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.22.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.23.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1705,7 +1705,7 @@ async function rewardsComputeEarned(customerId) {
     multByOrderId[r.o.id] = rewardsTierFor(rev, rangosPrevios.size).mult;
   }
 
-  // rentas contables de 12m para el NIVEL actual (vía frecuencia): base >= $750
+  // rentas contables de 12m para el NIVEL actual (vía frecuencia): base >= $500
   // y UNA por rango de fechas — partir una orden en tres no cuenta triple.
   const rangos12m = new Set();
   let pointsBaseMultCents = 0;
@@ -2416,7 +2416,17 @@ app.post('/rewards/atribuir', async (req, res) => {
       }
     } catch (e2) { /* si falla, se atribuye el total */ }
     const baseCents = Math.max(0, gt - excl);
-    const puntos = Math.floor(baseCents / 100 / 100);
+    // Los puntos viajan CON el multiplicador que la orden le ganó al titular
+    // (auditoría 5-ago-2026): registrar 1x cuando el titular es Plata/Oro dejaba
+    // la diferencia en su cuenta — la orden quedaba repartida entre dos cuentas,
+    // justo lo que los términos §7 prohíben.
+    let multOrden = 1;
+    try {
+      const earnedTit = await rewardsComputeEarned(oa.customer_id);
+      const ordTit = (earnedTit.orders || []).find(o2 => String(o2.id) === String(order.id));
+      if (ordTit && ordTit.mult) multOrden = ordTit.mult;
+    } catch (e4) { /* sin dato del titular: 1x conservador */ }
+    const puntos = Math.floor((baseCents * multOrden) / 100 / 100);
     if (puntos <= 0) return res.status(409).json({ ok: false, error: 'esa orden no genera puntos' });
 
     // 4) titular actual (para el registro y para restarle los puntos)
@@ -2582,6 +2592,79 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
   if (!orderNumber) return res.status(400).json({ ok: false, error: 'order_number requerido' });
   if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'aplicacion de folios deshabilitada (Ledger no configurado)' });
   try {
+    // Términos §4 también en el camino del folio (auditoría 5-ago-2026): antes
+    // este endpoint solo marcaba el Ledger y NINGUNA capa validaba la orden —
+    // los candados vivían solo en /pagar. Mismos checks, solo lectura.
+    let creditoCents = 0;
+    try {
+      const fq = await fetch(REWARDS_SHEETS_URL + '?action=folio&folio=' + encodeURIComponent(folio),
+        { redirect: 'follow' }).then(r2 => r2.json());
+      if (fq && fq.ok && !fq.found) return res.status(404).json({ ok: false, error: 'folio no encontrado' });
+      if (fq && fq.found) {
+        const est = String((fq.folio || {}).estado || 'pendiente');
+        if (est !== 'pendiente') {
+          return res.status(409).json({
+            ok: false, updated: false, estado_previo: est,
+            error: est === 'aplicado' ? 'el folio ya estaba aplicado' : ('el folio no se puede aplicar (estado: ' + est + ')')
+          });
+        }
+        // El crédito viene en el nombre de la recompensa ("Crédito de $700 en ...")
+        const m = String((fq.folio || {}).reward || '').match(/\$\s?([\d,]+)/);
+        if (m) creditoCents = parseInt(m[1].replace(/,/g, ''), 10) * 100;
+      }
+    } catch (eF) { /* si el Ledger no responde aquí, el POST de abajo lo re-checa */ }
+
+    const odF = await booqableGet('/orders?filter[number]=' + orderNumber + '&page[size]=2');
+    const orderF = (odF.data || [])[0];
+    if (!orderF) return res.status(404).json({ ok: false, error: 'no existe la orden #' + orderNumber });
+    const oaF = orderF.attributes || {};
+    if (oaF.status === 'canceled') {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' esta cancelada' });
+    }
+    if (oaF.status === 'started' || oaF.status === 'stopped') {
+      return res.status(409).json({
+        ok: false,
+        error: 'la orden #' + orderNumber + (oaF.status === 'started' ? ' ya esta en curso' : ' ya termino') +
+          ': el credito aplica solo en rentas nuevas, antes de facturar'
+      });
+    }
+    if (oaF.payment_status === 'paid') {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el credito se aplica antes del pago' });
+    }
+    const ldF = await booqableGet('/lines?filter[order_id]=' + orderF.id + '&page[size]=100');
+    const lineasF = (ldF.data || []).filter(l => !((l.attributes || {}).archived));
+    const esVentaF = lineasF.some(l => {
+      const t = String((l.attributes || {}).title || '').toLowerCase().trim();
+      return t.indexOf('venta ') === 0 || t.indexOf('venta-') === 0 || t.indexOf('venta:') === 0;
+    });
+    if (esVentaF) {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' incluye venta de equipo: los creditos Rewards aplican solo en rentas' });
+    }
+    // Otro crédito Rewards en la orden (de /pagar u otro folio) = doble descuento.
+    // Si la línea menciona ESTE folio es el descuento manual de este mismo canje.
+    const rewardsAjena = lineasF.some(l => {
+      const t = String((l.attributes || {}).title || '');
+      return t.toLowerCase().indexOf('filmorent rewards') === 0 && t.toUpperCase().indexOf(folio) === -1;
+    });
+    if (rewardsAjena) {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene otro credito Rewards aplicado' });
+    }
+    if (creditoCents > 0) {
+      // Si el descuento de este folio ya está en la orden, el total ya bajó:
+      // exigir 2x sobre ese total castigaría el flujo legítimo — el piso baja a 1x.
+      const descuentoYaEnOrden = lineasF.some(l =>
+        String((l.attributes || {}).title || '').toUpperCase().indexOf(folio) >= 0);
+      const minimo = descuentoYaEnOrden ? creditoCents : creditoCents * 2;
+      const twt = oaF.grand_total_with_tax_in_cents || 0;
+      if (twt < minimo) {
+        return res.status(409).json({
+          ok: false,
+          error: 'la orden debe ser de al menos ' + rewardsFormatMXN(creditoCents * 2) +
+            ' (2x el credito de ' + rewardsFormatMXN(creditoCents) + '); total actual con IVA: ' + rewardsFormatMXN(twt)
+        });
+      }
+    }
+
     const r = await fetch(REWARDS_SHEETS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
