@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.25.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.26.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1952,6 +1952,24 @@ app.get('/rewards/member', async (req, res) => {
     const out = await rewardsBuildMember(customer);
     console.log('[rewards] member ' + email + ' -> ' + out.points.available + ' pts disponibles (' +
       out.points.earned + ' ganados, ' + out.points.redeemed + ' canjeados, ledger=' + out.ledger_ok + ')');
+    // Contador de visitas al portal (pedido de Daniel 6-ago-2026): cuenta SOLO si
+    // la consulta viene del portal (header Origin de nuestros dominios) — los
+    // curls de monitoreo y el mostrador no ensucian el dato. Una por cliente por
+    // día (dedupe en el Ledger) y fire-and-forget: jamás frena la respuesta.
+    const visOrigin = String(req.headers.origin || '');
+    if (REWARDS_SHEETS_URL && process.env.REWARDS_HITOS_KEY && REWARDS_ORIGINS.includes(visOrigin)) {
+      const hoyMty = new Date(Date.now() - 6 * 3600 * 1000).toISOString().slice(0, 10);
+      fetch(REWARDS_SHEETS_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tipo: 'visita', k: process.env.REWARDS_HITOS_KEY,
+          clave: customer.id + '|' + hoyMty,
+          customer_id: customer.id, email: email,
+          nombre: rewardsCellSafe(rewardsCleanName((customer.attributes || {}).name))
+        }),
+        redirect: 'follow'
+      }).catch(() => { /* la visita nunca es crítica */ });
+    }
     return res.json(Object.assign({ ok: true }, out));
   } catch (e) {
     console.error('[rewards] member error: ' + e.message);
