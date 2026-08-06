@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.24.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.25.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1456,6 +1456,43 @@ const REWARDS_RENTA_MIN_CENTS = 50000;
 // (no regalarle miles de puntos de golpe a los Oro).
 const REWARDS_MULT_DESDE = '2026-08-01';
 
+// Vigencia por ACTIVIDAD (decisión de Daniel 6-ago-2026, estilo Club Comex):
+// los puntos viven mientras la cuenta rente al menos una vez cada 6 meses.
+// Un hueco de más de 183 días sin rentas (contado solo desde el arranque del
+// programa) CADUCA lo acumulado hasta ese hueco — definitivo: las rentas
+// posteriores acumulan desde cero. El reloj de los puntos de arranque corre
+// desde REWARDS_ARRANQUE, no desde la última renta vieja (si no, los dormidos
+// del win-back nacerían caducados). Términos §6 v2.2.
+const REWARDS_INACTIVIDAD_DIAS = 183;
+const REWARDS_ARRANQUE = '2026-08-06';
+
+// Recorre las fechas de renta (ascendentes, ISO) y devuelve:
+//  · vivo_desde: solo órdenes con fecha >= vivo_desde generan puntos (null = todas)
+//  · caducado:   el saldo actual ya venció (hueco de 183d hasta hoy)
+//  · limite:     fecha en que caduca el saldo si no vuelve a rentar
+// El hueco histórico PERSISTE en la serie de fechas, así que un caducado que
+// vuelve a rentar acumula desde cero sin revivir lo viejo.
+function rewardsVigencia(fechasAsc, ahoraMs) {
+  const GAP = REWARDS_INACTIVIDAD_DIAS * 86400000;
+  const arranque = new Date(REWARDS_ARRANQUE + 'T00:00:00Z').getTime();
+  let vivoDesde = null;
+  let reloj = arranque;
+  for (const f of fechasAsc) {
+    const t = new Date(f).getTime();
+    if (isNaN(t)) continue;
+    if (t > reloj) {
+      if (t - reloj > GAP) vivoDesde = f;   // hubo hueco: lo anterior caduca
+      reloj = t;
+    }
+  }
+  const caducado = (ahoraMs - reloj) > GAP;
+  return {
+    vivo_desde: caducado ? '9999-12-31' : vivoDesde,
+    caducado: caducado,
+    limite: new Date(reloj + GAP).toISOString().slice(0, 10)
+  };
+}
+
 // Cuentas que NO participan en el programa (decisión de Daniel 24-jul-2026):
 // socios/internos. No aparecen en /member, /redeem, /pagar ni en el índice QR.
 const REWARDS_EXCLUDED_CUSTOMER_IDS = new Set([
@@ -1709,11 +1746,17 @@ async function rewardsComputeEarned(customerId) {
   // y UNA por rango de fechas — partir una orden en tres no cuenta triple.
   const rangos12m = new Set();
   let pointsBaseMultCents = 0;
+  // Vigencia por actividad (§6): huecos de 6 meses caducan lo anterior. El
+  // NIVEL no se toca aquí — se calcula solo con la ventana rodante de 12m.
+  const fechasAsc = pre.map(r => r.fecha).sort();
+  const vigencia = rewardsVigencia(fechasAsc, Date.now());
   const orderRows = pre.map(r => {
     totalBaseCents += r.g;
     totalElsepcCents += r.elBase;
     const mult = multByOrderId[r.o.id] || 1;
-    pointsBaseMultCents += Math.round(r.base * mult);
+    if (!vigencia.vivo_desde || r.fecha >= vigencia.vivo_desde) {
+      pointsBaseMultCents += Math.round(r.base * mult);
+    }
     if (r.fecha >= cutoff12m) {
       revenue12mCents += r.base;
       if (r.base >= REWARDS_RENTA_MIN_CENTS) rangos12m.add(rangoDe(r.a));
@@ -1741,6 +1784,7 @@ async function rewardsComputeEarned(customerId) {
     revenue_12m_cents: revenue12mCents,
     rentas_12m: rangos12m.size,
     elsepc_excluded_cents: totalElsepcCents,
+    vigencia: vigencia,   // {vivo_desde, caducado, limite} — §6 v2.2
     points_earned: Math.floor(pointsBaseMultCents / 100 / 100)
   };
 }
@@ -1859,6 +1903,8 @@ async function rewardsBuildMember(customer) {
       // exclusión vigente (tab Exclusiones del Ledger) — el portal la ignora;
       // el mostrador la puede mostrar para que el staff sepa el motivo
       exclusion: (ledger && ledger.exclusion) || null,
+      // vigencia §6: limite = fecha en que caduca el saldo si no vuelve a rentar
+      vigencia: earned.vigencia || null,
       member_since: a.created_at,
       last_order_at: a.last_order_at || a.latest_order_at || null,
       order_count: a.order_count || 0,
@@ -1936,6 +1982,9 @@ app.post('/rewards/redeem', async (req, res) => {
     if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
     const candado = rewardsCandadoCanje(ledger, earned.orders);
     if (candado) return res.status(candado.status).json({ ok: false, error: candado.error });
+    if (earned.vigencia && earned.vigencia.caducado) {
+      return res.status(409).json({ ok: false, error: 'tus puntos caducaron por inactividad (6 meses sin rentas — reglas del programa §6); tus proximas rentas vuelven a acumular desde cero' });
+    }
     const countableOrders = earned.orders.length;
     const avgTicketCents = countableOrders ? Math.round(earned.revenue_cents / countableOrders) : 0;
     const catalog = rewardsCatalogFor(avgTicketCents);
@@ -2131,6 +2180,9 @@ app.post('/rewards/pagar', async (req, res) => {
     if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
     const candadoPagar = rewardsCandadoCanje(ledger, earned.orders);
     if (candadoPagar) return res.status(candadoPagar.status).json({ ok: false, error: candadoPagar.error });
+    if (earned.vigencia && earned.vigencia.caducado) {
+      return res.status(409).json({ ok: false, error: 'los puntos de esta cuenta caducaron por inactividad (6 meses sin rentas); sus proximas rentas vuelven a acumular desde cero' });
+    }
     const countableOrders = earned.orders.length;
     const avgTicketCents = countableOrders ? Math.round(earned.revenue_cents / countableOrders) : 0;
     const reward = rewardsCatalogFor(avgTicketCents).find(r => r.id === rewardId);
