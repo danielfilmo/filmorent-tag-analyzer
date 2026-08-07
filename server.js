@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.27.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.28.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1937,20 +1937,32 @@ async function rewardsBuildMember(customer) {
   };
 }
 
-// ── GET /rewards/member?email= ──────────────────────────────
+// ── GET /rewards/member?email=  |  ?customer_id= + token ────
+// v8.28.0: dos puertas de entrada. La de siempre (correo) y la del login por
+// WhatsApp, que entrega un customer_id respaldado por un token firmado. En la
+// vía customer_id el token se exige SIEMPRE: el id viaja dentro del QR del
+// miembro, así que sin firma sería una llave pública a los datos de cualquiera.
 app.get('/rewards/member', async (req, res) => {
   const email = String(req.query.email || '').trim().toLowerCase();
-  if (!email || email.indexOf('@') === -1) {
+  const porId = String(req.query.customer_id || '').trim();
+  if (!email && !porId) return res.status(400).json({ ok: false, error: 'falta email o customer_id' });
+  if (!porId && email.indexOf('@') === -1) {
     return res.status(400).json({ ok: false, error: 'email invalido' });
   }
+  if (porId) {
+    const ses = rewardsSesionDe(req);
+    if (!ses || ses.ids.indexOf(porId) === -1) {
+      return res.status(401).json({ ok: false, error: 'sesion invalida o vencida, vuelve a entrar' });
+    }
+  }
   try {
-    const customer = await rewardsFindCustomer(email);
-    if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
+    const customer = porId ? await rewardsCustomerById(porId) : await rewardsFindCustomer(email);
+    if (!customer) return res.status(404).json({ ok: false, error: porId ? 'no existe esa cuenta' : 'no existe cuenta con ese email' });
     if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customer.id)) {
       return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
     }
     const out = await rewardsBuildMember(customer);
-    console.log('[rewards] member ' + email + ' -> ' + out.points.available + ' pts disponibles (' +
+    console.log('[rewards] member ' + (email || 'id:' + porId) + ' -> ' + out.points.available + ' pts disponibles (' +
       out.points.earned + ' ganados, ' + out.points.redeemed + ' canjeados, ledger=' + out.ledger_ok + ')');
     // Contador de visitas al portal (pedido de Daniel 6-ago-2026): cuenta SOLO si
     // la consulta viene del portal (header Origin de nuestros dominios) — los
@@ -1964,7 +1976,7 @@ app.get('/rewards/member', async (req, res) => {
         body: JSON.stringify({
           tipo: 'visita', k: process.env.REWARDS_HITOS_KEY,
           clave: customer.id + '|' + hoyMty,
-          customer_id: customer.id, email: email,
+          customer_id: customer.id, email: email || String((customer.attributes || {}).email || ''),
           nombre: rewardsCellSafe(rewardsCleanName((customer.attributes || {}).name))
         }),
         redirect: 'follow'
@@ -1973,6 +1985,245 @@ app.get('/rewards/member', async (req, res) => {
     return res.json(Object.assign({ ok: true }, out));
   } catch (e) {
     console.error('[rewards] member error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error consultando Booqable, intenta de nuevo' });
+  }
+});
+
+// ============================================================
+// v8.28.0 LOGIN DEL CLIENTE POR WHATSAPP (OTP) — 7-ago-2026
+// Por qué: el portal identifica al miembro por el correo de su ficha de
+// Booqable, y 405 de los 1,987 clientes con órdenes (20.8%) están registrados
+// con un correo corporativo que su empresa puede apagar. Caso que lo destapó:
+// Christian Manaure (Oro, 2,771 pts) no podía entrar porque Multimedios ya dio
+// de baja su correo. El teléfono sobrevive al cambio de trabajo y la cobertura
+// es la misma: 97.8% de los clientes con órdenes tiene teléfono vs 98.0% con
+// correo (medido sobre los 3,869 clientes de Booqable, 7-ago-2026).
+//
+// El login por correo SE CONSERVA — esto es una segunda puerta, no un
+// reemplazo: 29 clientes activos tienen correo sin teléfono y 25 al revés.
+//
+//   POST /rewards/otp/solicitar {phone}        -> manda el código por WhatsApp
+//   POST /rewards/otp/verificar {phone, code}  -> {token, cuentas:[...]}
+//   GET  /rewards/member?customer_id=&token    -> igual que por correo
+//
+// El código va en la plantilla `rewards_codigo_acceso` (categoría
+// Authentication, es), aprobada por Meta el 7-ago-2026. Fuera de la ventana de
+// 24 h WhatsApp SOLO entrega plantillas aprobadas, por eso no se manda texto.
+// El payload de la plantilla es el que da Respond.io en "Copy API Payload".
+// ============================================================
+
+const REWARDS_OTP_SECRET = process.env.REWARDS_OTP_SECRET || '';
+const REWARDS_OTP_TEMPLATE = process.env.REWARDS_OTP_TEMPLATE || 'rewards_codigo_acceso';
+const REWARDS_OTP_CHANNEL = parseInt(process.env.REWARDS_OTP_CHANNEL || '469627', 10);
+const REWARDS_OTP_TTL_MS = 10 * 60 * 1000;   // igual que la expiración de la plantilla
+const REWARDS_OTP_MAX_INTENTOS = 5;          // por código
+const REWARDS_OTP_MAX_ENVIOS = 3;            // por teléfono por hora (cada envío cuesta)
+const REWARDS_SESION_DIAS = 30;              // el portal guarda el token en el teléfono
+// phone10 -> {code, exp, intentos, envios:[timestamps]}. En memoria a propósito:
+// si Render reinicia, el código en vuelo se pierde y el cliente pide otro. Un
+// OTP que sobrevive al reinicio del server es un OTP que vive de más.
+const rewardsOtps = new Map();
+
+// Últimos 10 dígitos: así se guarda el teléfono en Booqable con y sin lada.
+function rewardsPhone10(raw) {
+  const d = String(raw || '').replace(/\D/g, '');
+  return d.length >= 10 ? d.slice(-10) : '';
+}
+
+function rewardsCustomerById(id) {
+  return booqableGet('/customers/' + encodeURIComponent(id))
+    .then(d => (d && d.data) || null)
+    .catch(e => { if (e.status === 404) return null; throw e; });
+}
+
+// Clientes cuyo teléfono termina en estos 10 dígitos. filter[q] busca en varios
+// campos a la vez, así que el match se CONFIRMA contra properties.phone/phone_2
+// (mismo candado que usa el copiloto de órdenes). Puede devolver más de uno:
+// 23 teléfonos están compartidos por 2+ clientes (46 clientes, 2.3%), casi
+// siempre fichas duplicadas de la misma persona. No se adivina: se pregunta.
+async function rewardsCustomersByPhone(phone10) {
+  if (!phone10) return [];
+  const d = await booqableGet('/customers?filter[q]=' + phone10 + '&page[size]=10');
+  return (d.data || []).filter(c => {
+    const a = c.attributes || {};
+    if (a.archived) return false;
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(c.id)) return false;
+    const p = a.properties || {};
+    return [p.phone, p.phone_2].some(t => {
+      const dd = String(t || '').replace(/\D/g, '');
+      return dd && dd.slice(-10) === phone10;
+    });
+  });
+}
+
+// Token de sesión propio (HMAC), no un JWT de librería: no se agregan
+// dependencias al package.json de producción. Trae los customer_id que ese
+// teléfono puede abrir — el server nunca confía en el id que manda el portal.
+function rewardsSesionFirmar(phone10, ids) {
+  const nodeCrypto = require('crypto');
+  const payload = Buffer.from(JSON.stringify({
+    p: phone10, ids: ids, exp: Date.now() + REWARDS_SESION_DIAS * 86400000
+  })).toString('base64url');
+  const firma = nodeCrypto.createHmac('sha256', REWARDS_OTP_SECRET).update(payload).digest('base64url');
+  return payload + '.' + firma;
+}
+
+function rewardsSesionAbrir(token) {
+  if (!REWARDS_OTP_SECRET) return null;
+  const partes = String(token || '').split('.');
+  if (partes.length !== 2) return null;
+  const nodeCrypto = require('crypto');
+  const esperada = nodeCrypto.createHmac('sha256', REWARDS_OTP_SECRET).update(partes[0]).digest('base64url');
+  const a = Buffer.from(partes[1]); const b = Buffer.from(esperada);
+  if (a.length !== b.length || !nodeCrypto.timingSafeEqual(a, b)) return null;
+  let datos = null;
+  try { datos = JSON.parse(Buffer.from(partes[0], 'base64url').toString('utf8')); } catch (e) { return null; }
+  if (!datos || !Array.isArray(datos.ids) || !datos.exp || Date.now() > datos.exp) return null;
+  return { phone: datos.p, ids: datos.ids };
+}
+
+// El token viaja en el header Authorization (fuera de la URL, igual que el del
+// staff); se acepta ?token= como respaldo para el <img> del QR y pruebas.
+function rewardsSesionDe(req) {
+  const h = String(req.headers.authorization || '');
+  const tok = h.indexOf('Bearer ') === 0 ? h.slice(7).trim() : String(req.query.token || '').trim();
+  return tok ? rewardsSesionAbrir(tok) : null;
+}
+
+async function respondPost(ruta, body) {
+  const r = await fetch('https://api.respond.io/v2' + ruta, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const txt = await r.text().catch(() => '');
+  let j = null; try { j = JSON.parse(txt); } catch (e) { /* respuesta no-JSON */ }
+  return { ok: r.ok, status: r.status, body: j, raw: txt.slice(0, 300) };
+}
+
+// México se guarda como +52XXXXXXXXXX en Booqable pero WhatsApp usa 521 para
+// los móviles, así que se prueban las dos formas antes de darse por vencido.
+async function rewardsEnviarCodigo(phone10, code) {
+  const msg = {
+    channelId: REWARDS_OTP_CHANNEL,
+    message: {
+      type: 'whatsapp_template',
+      template: {
+        name: REWARDS_OTP_TEMPLATE,
+        languageCode: 'es',
+        components: [
+          // El "text" es lo que se ve en el Inbox de Respond.io; el que entrega
+          // WhatsApp es el de la plantilla aprobada, no éste.
+          { type: 'body', text: code + ' es tu código de acceso a Filmorent Rewards.', parameters: [{ type: 'text', text: code }] },
+          { type: 'buttons', buttons: [{ type: 'otp', parameters: [{ type: 'text', text: code }] }] }
+        ]
+      }
+    }
+  };
+  let ultimo = 'sin intentos';
+  for (const ident of ['phone:+52' + phone10, 'phone:+521' + phone10]) {
+    const ruta = '/contact/' + encodeURIComponent(ident) + '/message';
+    let r = await respondPost(ruta, msg);
+    if (!r.ok && r.status === 404) {
+      // Nunca nos ha escrito: se da de alta el contacto y se reintenta una vez.
+      await respondPost('/contact/create_or_update/' + encodeURIComponent(ident), { phone: ident.slice(6) });
+      r = await respondPost(ruta, msg);
+    }
+    if (r.ok) return { ok: true, identificador: ident };
+    ultimo = r.status + ' ' + ((r.body && (r.body.message || r.body.error)) || r.raw);
+  }
+  return { ok: false, error: ultimo };
+}
+
+// ── POST /rewards/otp/solicitar  {phone} ────────────────────
+app.post('/rewards/otp/solicitar', async (req, res) => {
+  if (!REWARDS_OTP_SECRET || !RESPONDIO_API_KEY) {
+    return res.status(503).json({ ok: false, error: 'login por WhatsApp deshabilitado (falta REWARDS_OTP_SECRET o RESPONDIO_API_KEY)' });
+  }
+  const phone10 = rewardsPhone10((req.body || {}).phone);
+  if (!phone10) return res.status(400).json({ ok: false, error: 'escribe tu celular a 10 dígitos' });
+  const ahora = Date.now();
+  const previo = rewardsOtps.get(phone10);
+  const envios = ((previo && previo.envios) || []).filter(t => ahora - t < 3600000);
+  if (envios.length >= REWARDS_OTP_MAX_ENVIOS) {
+    return res.status(429).json({ ok: false, error: 'ya te mandamos varios códigos, espera una hora o entra con tu correo' });
+  }
+  try {
+    const clientes = await rewardsCustomersByPhone(phone10);
+    // Mismo criterio que el login por correo: se dice que no hay cuenta para que
+    // el portal pueda ofrecer la otra puerta en vez de dejar al cliente colgado.
+    if (!clientes.length) {
+      return res.status(404).json({ ok: false, error: 'no encontramos una cuenta con ese teléfono' });
+    }
+    const nodeCrypto = require('crypto');
+    const code = String(nodeCrypto.randomInt(0, 1000000)).padStart(6, '0');
+    envios.push(ahora);
+    rewardsOtps.set(phone10, { code: code, exp: ahora + REWARDS_OTP_TTL_MS, intentos: 0, envios: envios });
+    if (rewardsOtps.size > 5000) { // tope de memoria, igual que el rate limit
+      for (const [k, v] of rewardsOtps) { if (v.exp < ahora) rewardsOtps.delete(k); }
+    }
+    const envio = await rewardsEnviarCodigo(phone10, code);
+    if (!envio.ok) {
+      // Nunca fallar en silencio: si WhatsApp no lo entregó, el cliente tiene que
+      // enterarse en la misma pantalla, no quedarse esperando un código fantasma.
+      console.error('[rewards] otp no enviado a ...' + phone10.slice(-4) + ': ' + envio.error);
+      rewardsOtps.delete(phone10);
+      return res.status(502).json({ ok: false, error: 'no pudimos mandarte el WhatsApp, intenta de nuevo o entra con tu correo' });
+    }
+    console.log('[rewards] otp enviado a ...' + phone10.slice(-4) + ' (' + clientes.length + ' cuenta(s) con ese tel)');
+    return res.json({
+      ok: true,
+      telefono: '••• ••• ' + phone10.slice(-4),
+      expira_min: Math.round(REWARDS_OTP_TTL_MS / 60000)
+    });
+  } catch (e) {
+    console.error('[rewards] otp solicitar error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error consultando Booqable, intenta de nuevo' });
+  }
+});
+
+// ── POST /rewards/otp/verificar  {phone, code} ──────────────
+app.post('/rewards/otp/verificar', async (req, res) => {
+  if (!REWARDS_OTP_SECRET) return res.status(503).json({ ok: false, error: 'login por WhatsApp deshabilitado' });
+  const phone10 = rewardsPhone10((req.body || {}).phone);
+  const code = String((req.body || {}).code || '').replace(/\D/g, '');
+  if (!phone10 || code.length !== 6) return res.status(400).json({ ok: false, error: 'código de 6 dígitos' });
+  const reg = rewardsOtps.get(phone10);
+  if (!reg || Date.now() > reg.exp) {
+    rewardsOtps.delete(phone10);
+    return res.status(400).json({ ok: false, error: 'el código venció, pide uno nuevo' });
+  }
+  reg.intentos++;
+  if (reg.intentos > REWARDS_OTP_MAX_INTENTOS) {
+    rewardsOtps.delete(phone10);
+    return res.status(429).json({ ok: false, error: 'demasiados intentos, pide un código nuevo' });
+  }
+  const nodeCrypto = require('crypto');
+  const a = Buffer.from(code); const b = Buffer.from(reg.code);
+  if (a.length !== b.length || !nodeCrypto.timingSafeEqual(a, b)) {
+    return res.status(401).json({ ok: false, error: 'código incorrecto', intentos_restantes: REWARDS_OTP_MAX_INTENTOS - reg.intentos });
+  }
+  rewardsOtps.delete(phone10); // un código, un uso
+  try {
+    const clientes = await rewardsCustomersByPhone(phone10);
+    if (!clientes.length) return res.status(404).json({ ok: false, error: 'no encontramos una cuenta con ese teléfono' });
+    // Más rentas primero: cuando hay ficha duplicada, la buena suele ser esa.
+    clientes.sort((x, y) => ((y.attributes || {}).order_count || 0) - ((x.attributes || {}).order_count || 0));
+    const cuentas = clientes.map(c => {
+      const a2 = c.attributes || {};
+      return {
+        customer_id: c.id,
+        nombre: rewardsCleanName(a2.name),
+        email: a2.email || '',              // ya se autenticó: ver su propio correo es el punto
+        order_count: a2.order_count || 0,
+        last_order_at: a2.latest_order_at || null
+      };
+    });
+    const token = rewardsSesionFirmar(phone10, cuentas.map(c => c.customer_id));
+    console.log('[rewards] otp ok ...' + phone10.slice(-4) + ' -> ' + cuentas.length + ' cuenta(s)');
+    return res.json({ ok: true, token: token, dias: REWARDS_SESION_DIAS, cuentas: cuentas });
+  } catch (e) {
+    console.error('[rewards] otp verificar error: ' + e.message);
     return res.status(502).json({ ok: false, error: 'error consultando Booqable, intenta de nuevo' });
   }
 });
