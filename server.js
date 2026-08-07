@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.26.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.27.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -3756,6 +3756,93 @@ app.post('/webhook/draft-order', async (req, res) => {
   }
 });
 
+
+
+// =====================================================================
+// ENVIAR INFO DEL ESTUDIO CON FOTOS (idea de Daniel, 3-ago-2026)
+// POST /webhook/enviar-info  body: { contactId }
+// El AI contestaba con puros links. Esto manda el cuadro de precios
+// publicado en filmorent.com (verificado: sus 15 precios coinciden con
+// Booqable y con el KB) y fotos reales del estudio. Detecta solo si
+// preguntan por el Grand o el Pocket leyendo la conversacion.
+// Lo dispara un HUMANO desde un Shortcut: el bot no manda esto solo.
+// =====================================================================
+const INFO_ESTUDIOS = {
+  grand: {
+    titulo: 'Estudio Filmo Grand',
+    texto: 'Te comparto el estudio Filmo Grand con sus tres paquetes y precios. ' +
+      'El bono de equipo es el 50% de lo que pagas de estudio, para usarlo en renta de equipo. ' +
+      'Dime que dia y de que hora a que hora lo ocupas y checo disponibilidad.',
+    imagenes: [
+      'https://filmorent.com/wp-content/uploads/filmogrand_precios_2026.jpeg',
+      'https://filmorent.com/wp-content/uploads/estudio-filmogrand-1.jpeg',
+      'https://filmorent.com/wp-content/uploads/estudio-filmogrand-3.jpeg',
+      'https://filmorent.com/wp-content/uploads/medidas-estudio-scaled.webp'
+    ],
+    link: 'https://filmorent.com/estudio-filmo-grand/'
+  },
+  pocket: {
+    titulo: 'Estudio Filmo Pocket',
+    texto: 'Te comparto el estudio Filmo Pocket. Dime que dia y de que hora a que hora lo ocupas ' +
+      'y checo disponibilidad.',
+    imagenes: [
+      'https://filmorent.com/wp-content/uploads/estudio-pocket-reservacion.jpg',
+      'https://filmorent.com/wp-content/uploads/estudio-pocket-medidas.jpg'
+    ],
+    link: 'https://filmorent.com/estudio-filmo-pocket/'
+  }
+};
+
+async function respondioEnviar(contactId, channelId, cuerpo) {
+  const r = await fetch('https://api.respond.io/v2/contact/id:' + contactId + '/message', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ channelId: channelId }, cuerpo))
+  });
+  if (!r.ok) throw new Error('Respond.io ' + r.status + ': ' + (await r.text()).slice(0, 160));
+  return r.json();
+}
+
+app.post('/webhook/enviar-info', async (req, res) => {
+  try {
+    const contactId = extractContactId(req.body);
+    if (!contactId || !/^\d+$/.test(String(contactId))) {
+      return res.status(400).json({ ok: false, error: 'contactId faltante o invalido' });
+    }
+    const md = await draftRespondioGet('/contact/id:' + contactId + '/message/list?limit=25');
+    const msgs = (md.items || md.data || []);
+    const texto = msgs.map(function (m) {
+      const x = m.message || {};
+      return String(x.text || x.message || '');
+    }).join(' ').toLowerCase();
+    const canal = (msgs[0] && msgs[0].channelId) || null;
+    const cual = /pocket/.test(texto) && !/grand/.test(texto) ? 'pocket' : 'grand';
+    const info = INFO_ESTUDIOS[cual];
+
+    await respondioEnviar(contactId, canal, {
+      message: { type: 'text', text: info.texto + '\n\n' + info.link }
+    });
+    const enviadas = [];
+    for (const url of info.imagenes) {
+      try {
+        await respondioEnviar(contactId, canal, {
+          message: { type: 'attachment', attachment: { type: 'image', url: url } }
+        });
+        enviadas.push(url.split('/').pop());
+      } catch (e) {
+        console.error('[enviar-info] imagen ' + url + ': ' + e.message);
+      }
+    }
+    await draftPostComment(contactId,
+      '\ud83d\udcf8 Le mande la info del ' + info.titulo + ': cuadro de precios + ' +
+      (enviadas.length - 1) + ' fotos. Falta preguntarle dia y horario para checar disponibilidad.');
+    console.log('[enviar-info] ' + cual + ' -> contacto ' + contactId + ' (' + enviadas.length + ' imagenes)');
+    return res.json({ ok: true, estudio: cual, imagenes: enviadas });
+  } catch (e) {
+    console.error('[enviar-info] ' + (e && e.message));
+    return res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+  }
+});
 
 app.listen(PORT, () => {
   console.log('Filmorent Tag Analyzer v7.2.1 running on port ' + PORT);
