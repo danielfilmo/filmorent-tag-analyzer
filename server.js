@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.30.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.30.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4042,8 +4042,10 @@ const INFO_ESTUDIOS = {
   pocket: {
     titulo: 'Filmo Pocket',
     secuencia: [
-      { t: 'FILMO POCKET \u2014 el chico, en el tercer piso. Para photoshoots, podcast, contenido y ' +
-           'videos musicales de escala chica. Sale en $700 por hora.\nhttps://filmorent.com/estudio-filmo-pocket/' },
+      // NO mencionar que esta en el tercer piso: es un dato logistico que solo
+      // desincentiva la venta (Daniel, 7-ago). Se resuelve al agendar.
+      { t: 'FILMO POCKET \u2014 el compacto. Ideal para photoshoots, podcast, contenido y videos ' +
+           'musicales de escala chica. Sale en $700 por hora.\nhttps://filmorent.com/estudio-filmo-pocket/' },
       { i: 'https://filmorent.com/wp-content/uploads/estudio-pocket-reservacion.jpg' },
       { t: 'Estas son sus medidas:' },
       { i: 'https://filmorent.com/wp-content/uploads/estudio-pocket-medidas.jpg' }
