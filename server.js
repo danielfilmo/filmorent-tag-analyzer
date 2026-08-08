@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.29.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.29.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4021,21 +4021,24 @@ app.post('/webhook/draft-order', async (req, res) => {
 const INFO_ESTUDIOS = {
   grand: {
     titulo: 'Filmo Grand',
-    texto: 'FILMO GRAND — el grande, para producciones, videos musicales, comerciales y hasta autos. ' +
-      'Tiene ciclorama, cocina, bano, mobiliario y pantalla de 65". Te paso los tres paquetes con precios; ' +
+    // OJO: este texto lo LEE EL CLIENTE. Va con acentos y eñes de verdad.
+    texto: 'FILMO GRAND \u2014 el grande, para producciones, videos musicales, comerciales y hasta autos. ' +
+      'Tiene ciclorama, cocina, ba\u00f1o, mobiliario y pantalla de 65". Te paso los tres paquetes con precios; ' +
       'el bono de equipo es el 50% de lo que pagas de estudio, para gastarlo en renta de equipo.',
-    // OJO: solo jpg/png. El .webp NO lo muestra WhatsApp (llega como link).
+    // estudioinicio.jpg es LA foto del estudio (el ciclorama). Las
+    // estudio-filmogrand-N son cocina y sala de clientes: solas no se
+    // entienden y confunden (Daniel, 7-ago). Solo jpg/png: el .webp llega
+    // como link porque WhatsApp no lo renderiza.
     imagenes: [
-      'https://filmorent.com/wp-content/uploads/filmogrand_precios_2026.jpeg',
-      'https://filmorent.com/wp-content/uploads/estudio-filmogrand-1.jpeg',
-      'https://filmorent.com/wp-content/uploads/estudio-filmogrand-3.jpeg'
+      'https://filmorent.com/wp-content/uploads/estudioinicio.jpg',
+      'https://filmorent.com/wp-content/uploads/filmogrand_precios_2026.jpeg'
     ],
     link: 'https://filmorent.com/estudio-filmo-grand/'
   },
   pocket: {
     titulo: 'Filmo Pocket',
-    texto: 'FILMO POCKET — el chico, en el tercer piso, para photoshoots, podcast y producciones mas ' +
-      'sencillas. Sale en $700 por hora. Aqui van fotos y las medidas.',
+    texto: 'FILMO POCKET \u2014 el chico, en el tercer piso, para photoshoots, podcast y producciones m\u00e1s ' +
+      'sencillas. Sale en $700 por hora. Aqu\u00ed van la foto y las medidas.',
     imagenes: [
       'https://filmorent.com/wp-content/uploads/estudio-pocket-reservacion.jpg',
       'https://filmorent.com/wp-content/uploads/estudio-pocket-medidas.jpg'
@@ -4067,10 +4070,15 @@ app.post('/webhook/enviar-info', async (req, res) => {
     }
     const md = await draftRespondioGet('/contact/id:' + contactId + '/message/list?limit=25');
     const msgs = (md.items || md.data || []);
-    const texto = msgs.map(function (m) {
-      const x = m.message || {};
-      return String(x.text || x.message || '');
-    }).join(' ').toLowerCase();
+    // SOLO mensajes del CLIENTE. Antes se leia toda la conversacion, incluidos
+    // NUESTROS propios mensajes — y como el texto del Grand dice "ciclorama" y
+    // "cocina", al segundo apreton el detector creia que habian pedido el Grand
+    // y el Pocket ya nunca salia (Daniel, 7-ago).
+    const texto = msgs.filter(function (m) { return m.traffic === 'incoming'; })
+      .map(function (m) {
+        const x = m.message || {};
+        return String(x.text || x.message || '');
+      }).join(' ').toLowerCase();
     const canal = (msgs[0] && msgs[0].channelId) || null;
     // Casi nadie dice CUAL estudio, solo "el estudio" (Daniel, 7-ago). Adivinar
     // el Grand deja fuera al Pocket, que es la opcion barata. Si no lo dicen
@@ -4084,7 +4092,7 @@ app.post('/webhook/enviar-info', async (req, res) => {
     if (cuales.length === 2) {
       await respondioEnviar(contactId, canal, {
         message: { type: 'text', text: 'Con gusto. Manejamos dos estudios y te paso los dos para que ' +
-          'veas cual te acomoda mejor:' }
+          'veas cu\u00e1l te acomoda mejor:' }
       });
     }
     const enviadas = [];
@@ -4108,8 +4116,8 @@ app.post('/webhook/enviar-info', async (req, res) => {
       }
     }
     await respondioEnviar(contactId, canal, {
-      message: { type: 'text', text: '\u00bfQue dia y de que hora a que hora lo ocupas? Con eso te ' +
-        'checo disponibilidad y te paso el total.' }
+      message: { type: 'text', text: '\u00bfQu\u00e9 d\u00eda y de qu\u00e9 hora a qu\u00e9 hora lo ocupas? ' +
+        'Con eso te checo disponibilidad y te paso el total.' }
     });
     await draftPostComment(contactId,
       '\ud83d\udcf8 Le mande info de: ' + cuales.map(function (c) { return INFO_ESTUDIOS[c].titulo; }).join(' y ') +
