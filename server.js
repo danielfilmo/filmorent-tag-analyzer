@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.28.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.29.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4020,22 +4020,22 @@ app.post('/webhook/draft-order', async (req, res) => {
 // =====================================================================
 const INFO_ESTUDIOS = {
   grand: {
-    titulo: 'Estudio Filmo Grand',
-    texto: 'Te comparto el estudio Filmo Grand con sus tres paquetes y precios. ' +
-      'El bono de equipo es el 50% de lo que pagas de estudio, para usarlo en renta de equipo. ' +
-      'Dime que dia y de que hora a que hora lo ocupas y checo disponibilidad.',
+    titulo: 'Filmo Grand',
+    texto: 'FILMO GRAND — el grande, para producciones, videos musicales, comerciales y hasta autos. ' +
+      'Tiene ciclorama, cocina, bano, mobiliario y pantalla de 65". Te paso los tres paquetes con precios; ' +
+      'el bono de equipo es el 50% de lo que pagas de estudio, para gastarlo en renta de equipo.',
+    // OJO: solo jpg/png. El .webp NO lo muestra WhatsApp (llega como link).
     imagenes: [
       'https://filmorent.com/wp-content/uploads/filmogrand_precios_2026.jpeg',
       'https://filmorent.com/wp-content/uploads/estudio-filmogrand-1.jpeg',
-      'https://filmorent.com/wp-content/uploads/estudio-filmogrand-3.jpeg',
-      'https://filmorent.com/wp-content/uploads/medidas-estudio-scaled.webp'
+      'https://filmorent.com/wp-content/uploads/estudio-filmogrand-3.jpeg'
     ],
     link: 'https://filmorent.com/estudio-filmo-grand/'
   },
   pocket: {
-    titulo: 'Estudio Filmo Pocket',
-    texto: 'Te comparto el estudio Filmo Pocket. Dime que dia y de que hora a que hora lo ocupas ' +
-      'y checo disponibilidad.',
+    titulo: 'Filmo Pocket',
+    texto: 'FILMO POCKET — el chico, en el tercer piso, para photoshoots, podcast y producciones mas ' +
+      'sencillas. Sale en $700 por hora. Aqui van fotos y las medidas.',
     imagenes: [
       'https://filmorent.com/wp-content/uploads/estudio-pocket-reservacion.jpg',
       'https://filmorent.com/wp-content/uploads/estudio-pocket-medidas.jpg'
@@ -4044,14 +4044,9 @@ const INFO_ESTUDIOS = {
   }
 };
 
-async function respondioEnviar(contactId, channelId, cuerpo) {
-  const r = await fetch('https://api.respond.io/v2/contact/id:' + contactId + '/message', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify(Object.assign({ channelId: channelId }, cuerpo))
-  });
-  if (!r.ok) throw new Error('Respond.io ' + r.status + ': ' + (await r.text()).slice(0, 160));
-  return r.json();
+// WhatsApp y Messenger no renderizan .webp: llega como link y se ve mal.
+function draftImagenEnviable(url) {
+  return /\.(jpe?g|png)(\?|$)/i.test(String(url || ''));
 }
 
 app.post('/webhook/enviar-info', async (req, res) => {
@@ -4067,28 +4062,54 @@ app.post('/webhook/enviar-info', async (req, res) => {
       return String(x.text || x.message || '');
     }).join(' ').toLowerCase();
     const canal = (msgs[0] && msgs[0].channelId) || null;
-    const cual = /pocket/.test(texto) && !/grand/.test(texto) ? 'pocket' : 'grand';
-    const info = INFO_ESTUDIOS[cual];
+    // Casi nadie dice CUAL estudio, solo "el estudio" (Daniel, 7-ago). Adivinar
+    // el Grand deja fuera al Pocket, que es la opcion barata. Si no lo dicen
+    // claro, se mandan LOS DOS y que el cliente elija.
+    const pidePocket = /pocket|chico|peque|podcast/.test(texto);
+    const pideGrand = /grand|grande|ciclorama|cocina/.test(texto);
+    const cuales = (pidePocket && !pideGrand) ? ['pocket']
+      : (pideGrand && !pidePocket) ? ['grand']
+      : ['grand', 'pocket'];
 
-    await respondioEnviar(contactId, canal, {
-      message: { type: 'text', text: info.texto + '\n\n' + info.link }
-    });
+    if (cuales.length === 2) {
+      await respondioEnviar(contactId, canal, {
+        message: { type: 'text', text: 'Con gusto. Manejamos dos estudios y te paso los dos para que ' +
+          'veas cual te acomoda mejor:' }
+      });
+    }
     const enviadas = [];
-    for (const url of info.imagenes) {
-      try {
-        await respondioEnviar(contactId, canal, {
-          message: { type: 'attachment', attachment: { type: 'image', url: url } }
-        });
-        enviadas.push(url.split('/').pop());
-      } catch (e) {
-        console.error('[enviar-info] imagen ' + url + ': ' + e.message);
+    const omitidas = [];
+    for (const cual of cuales) {
+      const info = INFO_ESTUDIOS[cual];
+      await respondioEnviar(contactId, canal, {
+        message: { type: 'text', text: info.texto + '\n' + info.link }
+      });
+      for (const url of info.imagenes) {
+        if (!draftImagenEnviable(url)) { omitidas.push(url.split('/').pop()); continue; }
+        try {
+          await respondioEnviar(contactId, canal, {
+            message: { type: 'attachment', attachment: { type: 'image', url: url } }
+          });
+          enviadas.push(url.split('/').pop());
+        } catch (e) {
+          console.error('[enviar-info] imagen ' + url + ': ' + e.message);
+          omitidas.push(url.split('/').pop());
+        }
       }
     }
+    await respondioEnviar(contactId, canal, {
+      message: { type: 'text', text: '\u00bfQue dia y de que hora a que hora lo ocupas? Con eso te ' +
+        'checo disponibilidad y te paso el total.' }
+    });
     await draftPostComment(contactId,
-      '\ud83d\udcf8 Le mande la info del ' + info.titulo + ': cuadro de precios + ' +
-      (enviadas.length - 1) + ' fotos. Falta preguntarle dia y horario para checar disponibilidad.');
-    console.log('[enviar-info] ' + cual + ' -> contacto ' + contactId + ' (' + enviadas.length + ' imagenes)');
-    return res.json({ ok: true, estudio: cual, imagenes: enviadas });
+      '\ud83d\udcf8 Le mande info de: ' + cuales.map(function (c) { return INFO_ESTUDIOS[c].titulo; }).join(' y ') +
+      ' (' + enviadas.length + ' imagenes)' +
+      (cuales.length === 2 ? ' \u2014 no dijo cual queria, asi que fueron los dos.' : '.') +
+      (omitidas.length ? ' NO se pudieron mandar: ' + omitidas.join(', ') + '.' : '') +
+      ' Falta que confirme dia y horario.');
+    console.log('[enviar-info] ' + cuales.join('+') + ' -> contacto ' + contactId +
+      ' (' + enviadas.length + ' imagenes, ' + omitidas.length + ' omitidas)');
+    return res.json({ ok: true, estudios: cuales, imagenes: enviadas, omitidas: omitidas });
   } catch (e) {
     console.error('[enviar-info] ' + (e && e.message));
     return res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
