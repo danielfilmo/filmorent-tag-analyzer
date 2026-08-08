@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.29.2', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.30.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4018,32 +4018,36 @@ app.post('/webhook/draft-order', async (req, res) => {
 // preguntan por el Grand o el Pocket leyendo la conversacion.
 // Lo dispara un HUMANO desde un Shortcut: el bot no manda esto solo.
 // =====================================================================
+// Secuencia de lo que se le manda al cliente. {t: texto} o {i: url de imagen}.
+// Respond.io DESCARTA el pie de foto (probado con description y caption: pasa
+// 200 pero no sobrevive), asi que cada foto lleva su nombre en una linea antes.
+// Los textos los LEE EL CLIENTE: van con acentos y enyes de verdad.
 const INFO_ESTUDIOS = {
   grand: {
     titulo: 'Filmo Grand',
-    // OJO: este texto lo LEE EL CLIENTE. Va con acentos y eñes de verdad.
-    texto: 'FILMO GRAND \u2014 el grande, para producciones, videos musicales, comerciales y hasta autos. ' +
-      'Tiene ciclorama, cocina, ba\u00f1o, mobiliario y pantalla de 65". Te paso los tres paquetes con precios; ' +
-      'el bono de equipo es el 50% de lo que pagas de estudio, para gastarlo en renta de equipo.',
-    // estudioinicio.jpg es LA foto del estudio (el ciclorama). Las
-    // estudio-filmogrand-N son cocina y sala de clientes: solas no se
-    // entienden y confunden (Daniel, 7-ago). Solo jpg/png: el .webp llega
-    // como link porque WhatsApp no lo renderiza.
-    imagenes: [
-      'https://filmorent.com/wp-content/uploads/estudioinicio.jpg',
-      'https://filmorent.com/wp-content/uploads/filmogrand_precios_2026.jpeg'
-    ],
-    link: 'https://filmorent.com/estudio-filmo-grand/'
+    secuencia: [
+      { t: 'FILMO GRAND \u2014 el grande, para producciones, videos musicales, comerciales y hasta autos. ' +
+           'Ciclorama, cocina, ba\u00f1o, mobiliario y pantalla de 65".\nhttps://filmorent.com/estudio-filmo-grand/' },
+      { i: 'https://filmorent.com/wp-content/uploads/estudioinicio.jpg' },
+      { t: 'Estos son los tres paquetes. El bono de equipo es el 50% de lo que pagas de estudio, ' +
+           'para gastarlo en renta de equipo:' },
+      { i: 'https://filmorent.com/wp-content/uploads/filmogrand_precios_2026.jpeg' },
+      { t: 'Y estos son los m\u00f3dulos que puedes agregar \u2014 sala de maquillaje, cocina y sala de ' +
+           'clientes con vista al estudio:' },
+      { i: 'https://filmorent.com/wp-content/uploads/estudio-filmogrand-2.jpeg' },
+      { i: 'https://filmorent.com/wp-content/uploads/estudio-filmogrand-1.jpeg' },
+      { i: 'https://filmorent.com/wp-content/uploads/estudio-filmogrand-3.jpeg' }
+    ]
   },
   pocket: {
     titulo: 'Filmo Pocket',
-    texto: 'FILMO POCKET \u2014 el chico, en el tercer piso, para photoshoots, podcast y producciones m\u00e1s ' +
-      'sencillas. Sale en $700 por hora. Aqu\u00ed van la foto y las medidas.',
-    imagenes: [
-      'https://filmorent.com/wp-content/uploads/estudio-pocket-reservacion.jpg',
-      'https://filmorent.com/wp-content/uploads/estudio-pocket-medidas.jpg'
-    ],
-    link: 'https://filmorent.com/estudio-filmo-pocket/'
+    secuencia: [
+      { t: 'FILMO POCKET \u2014 el chico, en el tercer piso. Para photoshoots, podcast, contenido y ' +
+           'videos musicales de escala chica. Sale en $700 por hora.\nhttps://filmorent.com/estudio-filmo-pocket/' },
+      { i: 'https://filmorent.com/wp-content/uploads/estudio-pocket-reservacion.jpg' },
+      { t: 'Estas son sus medidas:' },
+      { i: 'https://filmorent.com/wp-content/uploads/estudio-pocket-medidas.jpg' }
+    ]
   }
 };
 
@@ -4098,20 +4102,20 @@ app.post('/webhook/enviar-info', async (req, res) => {
     const enviadas = [];
     const omitidas = [];
     for (const cual of cuales) {
-      const info = INFO_ESTUDIOS[cual];
-      await respondioEnviar(contactId, canal, {
-        message: { type: 'text', text: info.texto + '\n' + info.link }
-      });
-      for (const url of info.imagenes) {
-        if (!draftImagenEnviable(url)) { omitidas.push(url.split('/').pop()); continue; }
+      for (const paso of INFO_ESTUDIOS[cual].secuencia) {
+        if (paso.t) {
+          await respondioEnviar(contactId, canal, { message: { type: 'text', text: paso.t } });
+          continue;
+        }
+        if (!draftImagenEnviable(paso.i)) { omitidas.push(paso.i.split('/').pop()); continue; }
         try {
           await respondioEnviar(contactId, canal, {
-            message: { type: 'attachment', attachment: { type: 'image', url: url } }
+            message: { type: 'attachment', attachment: { type: 'image', url: paso.i } }
           });
-          enviadas.push(url.split('/').pop());
+          enviadas.push(paso.i.split('/').pop());
         } catch (e) {
-          console.error('[enviar-info] imagen ' + url + ': ' + e.message);
-          omitidas.push(url.split('/').pop());
+          console.error('[enviar-info] imagen ' + paso.i + ': ' + e.message);
+          omitidas.push(paso.i.split('/').pop());
         }
       }
     }
