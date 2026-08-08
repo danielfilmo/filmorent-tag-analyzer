@@ -93,7 +93,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.29.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.29.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4043,6 +4043,16 @@ const INFO_ESTUDIOS = {
     link: 'https://filmorent.com/estudio-filmo-pocket/'
   }
 };
+
+async function respondioEnviar(contactId, channelId, cuerpo) {
+  const r = await fetch('https://api.respond.io/v2/contact/id:' + contactId + '/message', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ channelId: channelId }, cuerpo))
+  });
+  if (!r.ok) throw new Error('Respond.io ' + r.status + ': ' + (await r.text()).slice(0, 160));
+  return r.json();
+}
 
 // WhatsApp y Messenger no renderizan .webp: llega como link y se ve mal.
 function draftImagenEnviable(url) {
