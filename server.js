@@ -7,6 +7,10 @@ const os = require('os');
 
 const app = express();
 app.use(express.json());
+// Imagenes propias servidas publicamente para poder mandarlas por WhatsApp:
+// la URL de un adjunto tiene que ser publica. Aqui vive la de medidas del
+// Filmo Grand, que en filmorent.com solo existe en .webp (llega como link).
+app.use('/assets', express.static(path.join(__dirname, 'assets'), { maxAge: '7d' }));
 
 // Config
 const RESPONDIO_API_KEY = process.env.RESPONDIO_API_KEY;
@@ -93,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.30.1', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.31.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4032,6 +4036,8 @@ const INFO_ESTUDIOS = {
       { t: 'Estos son los tres paquetes. El bono de equipo es el 50% de lo que pagas de estudio, ' +
            'para gastarlo en renta de equipo:' },
       { i: 'https://filmorent.com/wp-content/uploads/filmogrand_precios_2026.jpeg' },
+      { t: 'Estas son las medidas:' },
+      { i: 'https://filmorent-tag-analyzer.onrender.com/assets/medidas-filmo-grand.jpg' },
       { t: 'Y estos son los m\u00f3dulos que puedes agregar \u2014 sala de maquillaje, cocina y sala de ' +
            'clientes con vista al estudio:' },
       { i: 'https://filmorent.com/wp-content/uploads/estudio-filmogrand-2.jpeg' },
