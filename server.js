@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.31.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.32.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2047,17 +2047,27 @@ function rewardsCustomerById(id) {
 // siempre fichas duplicadas de la misma persona. No se adivina: se pregunta.
 async function rewardsCustomersByPhone(phone10) {
   if (!phone10) return [];
-  const d = await booqableGet('/customers?filter[q]=' + phone10 + '&page[size]=10');
-  return (d.data || []).filter(c => {
-    const a = c.attributes || {};
-    if (a.archived) return false;
-    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(c.id)) return false;
-    const p = a.properties || {};
-    return [p.phone, p.phone_2].some(t => {
-      const dd = String(t || '').replace(/\D/g, '');
-      return dd && dd.slice(-10) === phone10;
+  // ~862 de 3,720 fichas guardan el teléfono FORMATEADO ('81 1570 9932') y
+  // filter[q] con los 10 dígitos pegados NO las encuentra (medido en vivo,
+  // review 10-ago-2026). La variante 'XXXX XXXX' (grupos 2º y 3º) encontró
+  // 8/8 fichas formateadas reales. Se intentan variantes en orden; el candado
+  // sigue siendo el post-filtro por dígitos EXACTOS — jamás se adivina.
+  const variantes = [phone10, phone10.slice(2, 6) + ' ' + phone10.slice(6)];
+  for (const v of variantes) {
+    const d = await booqableGet('/customers?filter[q]=' + encodeURIComponent(v) + '&page[size]=25');
+    const buenos = (d.data || []).filter(c => {
+      const a = c.attributes || {};
+      if (a.archived) return false;
+      if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(c.id)) return false;
+      const p = a.properties || {};
+      return [p.phone, p.phone_2].some(t => {
+        const dd = String(t || '').replace(/\D/g, '');
+        return dd && dd.slice(-10) === phone10;
+      });
     });
-  });
+    if (buenos.length) return buenos;
+  }
+  return [];
 }
 
 // Token de sesión propio (HMAC), no un JWT de librería: no se agregan
@@ -2105,9 +2115,46 @@ async function respondPost(ruta, body) {
   return { ok: r.ok, status: r.status, body: j, raw: txt.slice(0, 300) };
 }
 
-// México se guarda como +52XXXXXXXXXX en Booqable pero WhatsApp usa 521 para
-// los móviles, así que se prueban las dos formas antes de darse por vencido.
-async function rewardsEnviarCodigo(phone10, code) {
+async function respondGet(ruta) {
+  const r = await fetch('https://api.respond.io/v2' + ruta, {
+    headers: { 'Authorization': 'Bearer ' + RESPONDIO_API_KEY }
+  });
+  const txt = await r.text().catch(() => '');
+  let j = null; try { j = JSON.parse(txt); } catch (e) { /* respuesta no-JSON */ }
+  return { ok: r.ok, status: r.status, body: j, raw: txt.slice(0, 300) };
+}
+
+// Tope GLOBAL de envíos por hora (review 10-ago-2026): el rate por IP se evade
+// rotando x-forwarded-for (el portal pega directo al origin), y los límites
+// por-clave solo frenan por-víctima. Sin un tope total, un atacante puede
+// agotar la cuota diaria de MailApp del Ledger (tumba TODOS los correos de
+// Rewards) o enumerar clientes. Estos topes son el freno cross-cuenta; a
+// escala piloto ningún tráfico legítimo se les acerca. Chequeo y cobro
+// SEPARADOS (2ª verificación): un envío que falla downstream no debe comerse
+// la cuota de los legítimos. Riesgo residual aceptado y documentado: un
+// atacante persistente puede quemar la cubeta compartida (503 temporal para
+// todos) — preferible a que queme la cuota de MailApp, y reversible subiendo
+// el tope por env sin deploy de código.
+const rewardsGlobalEnvios = new Map(); // tipo -> [timestamps]
+function rewardsGlobalLleno(tipo, maxPorHora) {
+  const ahora = Date.now();
+  const lista = (rewardsGlobalEnvios.get(tipo) || []).filter(t => ahora - t < 3600000);
+  rewardsGlobalEnvios.set(tipo, lista);
+  return lista.length >= maxPorHora;
+}
+function rewardsGlobalCobrar(tipo) {
+  const lista = rewardsGlobalEnvios.get(tipo) || [];
+  lista.push(Date.now());
+  rewardsGlobalEnvios.set(tipo, lista);
+}
+
+// El botón de la plantilla Authentication se manda como type 'url' con el código
+// de parámetro — mandarlo como 'otp' produce el Meta #131008 ("Button at index 0
+// of type Url requires a parameter"): ese fue el bug del 10-ago-2026 con el que
+// NADIE podía entrar por WhatsApp. Y como Respond.io acepta el mensaje y el
+// rechazo de Meta llega DESPUÉS, tras enviar se consulta el estado real unos
+// segundos antes de decirle al cliente "enviado".
+async function rewardsEnviarCodigo(idents, code) {
   const msg = {
     channelId: REWARDS_OTP_CHANNEL,
     message: {
@@ -2119,13 +2166,13 @@ async function rewardsEnviarCodigo(phone10, code) {
           // El "text" es lo que se ve en el Inbox de Respond.io; el que entrega
           // WhatsApp es el de la plantilla aprobada, no éste.
           { type: 'body', text: code + ' es tu código de acceso a Filmorent Rewards.', parameters: [{ type: 'text', text: code }] },
-          { type: 'buttons', buttons: [{ type: 'otp', parameters: [{ type: 'text', text: code }] }] }
+          { type: 'buttons', buttons: [{ type: 'url', parameters: [{ type: 'text', text: code }] }] }
         ]
       }
     }
   };
   let ultimo = 'sin intentos';
-  for (const ident of ['phone:+52' + phone10, 'phone:+521' + phone10]) {
+  for (const ident of idents) {
     const ruta = '/contact/' + encodeURIComponent(ident) + '/message';
     let r = await respondPost(ruta, msg);
     if (!r.ok && r.status === 404) {
@@ -2133,10 +2180,75 @@ async function rewardsEnviarCodigo(phone10, code) {
       await respondPost('/contact/create_or_update/' + encodeURIComponent(ident), { phone: ident.slice(6) });
       r = await respondPost(ruta, msg);
     }
-    if (r.ok) return { ok: true, identificador: ident };
-    ultimo = r.status + ' ' + ((r.body && (r.body.message || r.body.error)) || r.raw);
+    if (!r.ok) {
+      ultimo = r.status + ' ' + ((r.body && (r.body.message || r.body.error)) || r.raw);
+      continue;
+    }
+    // Nota interna para el equipo (pedido de Daniel 10-ago-2026): las plantillas
+    // por API se ven como "unsupported" en el Inbox y nadie sabe qué se mandó.
+    // Fire-and-forget: el aviso jamás frena el login. El código NO va en la nota.
+    const avisoInterno = () => {
+      respondPost('/contact/' + encodeURIComponent(ident) + '/comment', {
+        text: '🤖 Rewards: se le envió por API su código de acceso al portal (plantilla rewards_codigo_acceso, login por WhatsApp). En el Inbox se ve como "unsupported", pero al cliente le llega normal.'
+      }).catch(() => { /* nunca es crítico */ });
+    };
+    const messageId = r.body && r.body.messageId;
+    if (!messageId) { avisoInterno(); return { ok: true, identificador: ident, verificado: false }; }
+    let fallo = null;
+    for (let i = 0; i < 4; i++) {
+      await new Promise(z => setTimeout(z, 1300));
+      // GET de mensaje individual: mismo endpoint que usa el MCP de Respond.io
+      // (verificado en vivo 10-ago-2026, regresó {status:[...]} en la raíz);
+      // se acepta también la forma {data:{...}} por si la API la envuelve, y
+      // si no viene status se loguea — nunca fallar en silencio.
+      const q = await respondGet('/contact/' + encodeURIComponent(ident) + '/message/' + messageId);
+      const cuerpoMsg = (q.body && (q.body.data || q.body)) || {};
+      const lista = Array.isArray(cuerpoMsg.status) ? cuerpoMsg.status : [];
+      if (!lista.length && i === 3) {
+        console.error('[rewards] verificacion de entrega sin status (' + q.status + '): ' + String(q.raw).slice(0, 120));
+      }
+      if (lista.some(s => s.value === 'failed')) {
+        fallo = (lista.filter(s => s.value === 'failed')[0] || {}).message || 'failed';
+        break;
+      }
+      if (lista.some(s => s.value === 'sent' || s.value === 'delivered' || s.value === 'read')) {
+        avisoInterno();
+        return { ok: true, identificador: ident, verificado: true };
+      }
+    }
+    if (fallo) { ultimo = 'WhatsApp: ' + fallo; continue; }
+    // Sigue "pending" tras ~5s: beneficio de la duda (el rechazo de Meta llega
+    // en <1s; un pending largo suele ser WhatsApp lento, no un error).
+    avisoInterno();
+    return { ok: true, identificador: ident, verificado: false };
   }
   return { ok: false, error: ultimo };
+}
+
+// A qué identificador de WhatsApp mandar el código (review 10-ago-2026):
+// - UN solo número completo con lada y NO es de México → SOLO ese (jamás caer
+//   a un +52 "inventado": ese WhatsApp sería de un desconocido en México).
+// - Cero o varios números completos distintos con el mismo last-10 → solo los
+//   formatos de México (+52 y el viejo +521), que apuntan a quien tecleó.
+function rewardsIdentsPara(clientes, phone10) {
+  const completos = [];
+  for (const c of clientes) {
+    const props = (c.attributes || {}).properties || {};
+    for (const t of [props.phone, props.phone_2]) {
+      const dd = String(t || '').replace(/\D/g, '');
+      if (dd.length > 10 && dd.slice(-10) === phone10 && completos.indexOf(dd) === -1) completos.push(dd);
+    }
+  }
+  // Solo se confía en el número de la ficha cuando es INEQUÍVOCO (2ª
+  // verificación del review): UNA sola ficha matcheada, UN solo número
+  // completo, lada real extranjera (ni '52' ni prefijos nacionales viejos
+  // '01'/'045', que empiezan con 0). Con 2+ fichas el código abriría una
+  // sesión multi-cuenta enviada al teléfono de OTRO — jamás adivinar.
+  if (completos.length === 1 && clientes.length === 1 &&
+      completos[0].slice(0, 2) !== '52' && completos[0].charAt(0) !== '0') {
+    return { idents: ['phone:+' + completos[0]], extranjero: true };
+  }
+  return { idents: ['phone:+52' + phone10, 'phone:+521' + phone10], extranjero: false };
 }
 
 // ── POST /rewards/otp/solicitar  {phone} ────────────────────
@@ -2166,7 +2278,13 @@ app.post('/rewards/otp/solicitar', async (req, res) => {
     if (rewardsOtps.size > 5000) { // tope de memoria, igual que el rate limit
       for (const [k, v] of rewardsOtps) { if (v.exp < ahora) rewardsOtps.delete(k); }
     }
-    const envio = await rewardsEnviarCodigo(phone10, code);
+    if (rewardsGlobalLleno('otp', 60)) {
+      rewardsOtps.delete(phone10);
+      return res.status(503).json({ ok: false, error: 'estamos mandando muchos códigos en este momento; intenta en unos minutos o entra con tu correo' });
+    }
+    const eleccion = rewardsIdentsPara(clientes, phone10);
+    const envio = await rewardsEnviarCodigo(eleccion.idents, code);
+    if (envio.ok) rewardsGlobalCobrar('otp');
     if (!envio.ok) {
       // Nunca fallar en silencio: si WhatsApp no lo entregó, el cliente tiene que
       // enterarse en la misma pantalla, no quedarse esperando un código fantasma.
@@ -2229,6 +2347,375 @@ app.post('/rewards/otp/verificar', async (req, res) => {
   } catch (e) {
     console.error('[rewards] otp verificar error: ' + e.message);
     return res.status(502).json({ ok: false, error: 'error consultando Booqable, intenta de nuevo' });
+  }
+});
+
+// ============================================================
+// VINCULAR CELULAR (10-ago-2026, pedido de Daniel tras el caso
+// Christian/Sultanes y el suyo propio: el celular del cliente no
+// está en su ficha de Booqable y el login por WhatsApp no lo
+// encuentra). DOBLE CANAL, decidido en la revisión adversarial:
+//   1. POST /rewards/vincular/solicitar {email, phone} → valida
+//      que el correo sea EXACTAMENTE el de la ficha y manda un
+//      enlace firmado a ESE buzón (el buzón autoriza).
+//   2. GET /rewards/vincular/confirmar?t=... → SOLO muestra la
+//      página (un GET jamás escribe: los escáners de correo tipo
+//      Safe Links abren los enlaces solos).
+//   3. POST /rewards/vincular/otp {t} → manda un código de
+//      WhatsApp AL CELULAR NUEVO (el celular demuestra posesión).
+//   4. POST /rewards/vincular/completar {t, code} → con ambas
+//      pruebas (buzón + celular) escribe la property en Booqable.
+//   Y POST /rewards/vincular/staff {nombre, phone, email} → deja
+//      la solicitud en el Ledger y avisa al equipo por correo.
+// Sin las DOS pruebas no se liga nada: los puntos son dinero, y
+// un enlace que escribiera solo (o un teléfono sin verificar)
+// era un account-takeover de un clic (hallazgo del review).
+// ============================================================
+
+const REWARDS_PUBLIC_URL = process.env.REWARDS_PUBLIC_URL || 'https://filmorent-tag-analyzer.onrender.com';
+const REWARDS_VINCULO_TTL_MS = 45 * 60 * 1000;  // vida del enlace del correo
+const rewardsVinculosUsados = new Map();        // firma -> exp. En memoria a propósito:
+// tras un reinicio el enlace "revive", pero ya no puede escribir nada sin un
+// código fresco al celular — el candado real es el doble canal, no este Map.
+const rewardsVinculoEnvios = new Map();         // clave -> [timestamps ultima hora]
+const rewardsVinculoCodigos = new Map();        // firma -> {code, exp, intentos}
+
+// Chequeo y cobro SEPARADOS (review): cobrar en el chequeo hacía que 3 typos
+// de correo bloquearan el teléfono 1 hora con un mensaje falso.
+function rewardsVinculoRateLleno(clave) {
+  const ahora = Date.now();
+  return ((rewardsVinculoEnvios.get(clave) || []).filter(t => ahora - t < 3600000)).length >= 3;
+}
+function rewardsVinculoRateCobrar(clave) {
+  const ahora = Date.now();
+  const lista = (rewardsVinculoEnvios.get(clave) || []).filter(t => ahora - t < 3600000);
+  lista.push(ahora);
+  rewardsVinculoEnvios.set(clave, lista);
+  if (rewardsVinculoEnvios.size > 5000) {
+    for (const [k, v] of rewardsVinculoEnvios) {
+      if (!v.some(t => ahora - t < 3600000)) rewardsVinculoEnvios.delete(k);
+    }
+  }
+}
+
+// Mismo esquema HMAC que la sesión del OTP; namespace propio para que un token
+// de vínculo jamás sirva como sesión ni al revés.
+function rewardsVinculoFirmar(customerId, phoneGuardar) {
+  const nodeCrypto = require('crypto');
+  const payload = Buffer.from(JSON.stringify({
+    c: customerId, t: phoneGuardar, a: 'vinculo', exp: Date.now() + REWARDS_VINCULO_TTL_MS
+  })).toString('base64url');
+  const firma = nodeCrypto.createHmac('sha256', REWARDS_OTP_SECRET).update('vinculo.' + payload).digest('base64url');
+  return payload + '.' + firma;
+}
+
+function rewardsVinculoAbrir(token) {
+  const nodeCrypto = require('crypto');
+  const partes = String(token || '').split('.');
+  if (partes.length !== 2 || !partes[0] || !partes[1]) return null;
+  const esperada = nodeCrypto.createHmac('sha256', REWARDS_OTP_SECRET).update('vinculo.' + partes[0]).digest('base64url');
+  const a = Buffer.from(partes[1]); const b = Buffer.from(esperada);
+  if (a.length !== b.length || !nodeCrypto.timingSafeEqual(a, b)) return null;
+  let datos = null;
+  try { datos = JSON.parse(Buffer.from(partes[0], 'base64url').toString()); } catch (e) { return null; }
+  if (!datos || datos.a !== 'vinculo' || !datos.exp || Date.now() > datos.exp) return null;
+  return datos;
+}
+
+// El celular como se va a GUARDAR en la ficha (review: la versión anterior le
+// inventaba lada de Japón al dedazo '81123456789'). Sin '+': solo 10 dígitos
+// exactos, o 12-13 que empiecen con 52 (México sin signo). Con '+': 11-15.
+// Cualquier otra cosa se rechaza — nunca se le inventa el país a un número.
+function rewardsVinculoPhone(raw) {
+  const limpio = String(raw || '').trim();
+  const digitos = limpio.replace(/\D/g, '');
+  if (limpio.charAt(0) === '+') {
+    return (digitos.length >= 11 && digitos.length <= 15) ? ('+' + digitos) : null;
+  }
+  if (digitos.length === 10) return digitos;
+  if ((digitos.length === 12 && digitos.slice(0, 2) === '52') ||
+      (digitos.length === 13 && digitos.slice(0, 3) === '521')) return '+' + digitos;
+  return null;
+}
+
+const REWARDS_VINCULO_MSG_TEL = 'escribe tu celular a 10 dígitos, o completo con + y lada de país si no es de México';
+
+// ── POST /rewards/vincular/solicitar  {email, phone} ────────
+app.post('/rewards/vincular/solicitar', async (req, res) => {
+  if (!REWARDS_OTP_SECRET) return res.status(503).json({ ok: false, error: 'vinculación deshabilitada (falta REWARDS_OTP_SECRET)' });
+  if (!REWARDS_SHEETS_URL || !process.env.REWARDS_HITOS_KEY) return res.status(503).json({ ok: false, error: 'correo de vinculación deshabilitado (Ledger no configurado)' });
+  const email = String((req.body || {}).email || '').trim().toLowerCase();
+  const phone = rewardsVinculoPhone((req.body || {}).phone);
+  if (!email || email.indexOf('@') === -1) return res.status(400).json({ ok: false, error: 'escribe tu correo registrado en Filmorent' });
+  if (!phone) return res.status(400).json({ ok: false, error: REWARDS_VINCULO_MSG_TEL });
+  if (rewardsVinculoRateLleno('e:' + email) || rewardsVinculoRateLleno('t:' + phone)) {
+    return res.status(429).json({ ok: false, error: 'hiciste varios intentos seguidos; espera una hora, o toca "Ya no tengo acceso a ese correo" para avisarle al equipo' });
+  }
+  try {
+    const customer = await rewardsFindCustomer(email);
+    // El correo debe ser EXACTAMENTE el de la ficha (review: sin esto, un match
+    // laxo de Booqable podría mandar el enlace a un buzón que no es el dueño).
+    const emailFicha = String(((customer || {}).attributes || {}).email || '').trim().toLowerCase();
+    if (!customer || (customer.attributes || {}).archived || emailFicha !== email) {
+      return res.status(404).json({ ok: false, error: 'ese correo no está registrado tal cual en Filmorent — revisa que esté bien escrito, o toca "Ya no tengo acceso a ese correo" para avisarle al equipo' });
+    }
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customer.id)) {
+      return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
+    }
+    const props = (customer.attributes || {}).properties || {};
+    const p10 = phone.replace(/\D/g, '').slice(-10);
+    const yaLigado = [props.phone, props.phone_2].some(t => String(t || '').replace(/\D/g, '').slice(-10) === p10);
+    if (yaLigado) {
+      return res.json({ ok: true, ya_ligado: true, mensaje: 'ese celular ya está en tu cuenta — pide tu código por WhatsApp directamente' });
+    }
+    if (props.phone && props.phone_2) {
+      return res.status(409).json({ ok: false, error: 'tu cuenta ya tiene 2 teléfonos registrados; toca "Ya no tengo acceso a ese correo" para que el equipo la actualice' });
+    }
+    if (rewardsGlobalLleno('correo_vinculo', 20)) {
+      return res.status(503).json({ ok: false, error: 'estamos recibiendo muchas solicitudes; intenta en un rato, o toca "Ya no tengo acceso a ese correo" para avisarle al equipo' });
+    }
+    const token = rewardsVinculoFirmar(customer.id, phone);
+    const url = REWARDS_PUBLIC_URL + '/rewards/vincular/confirmar?t=' + encodeURIComponent(token);
+    const r = await fetch(REWARDS_SHEETS_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tipo: 'correo_vinculo', k: process.env.REWARDS_HITOS_KEY,
+        email: email,
+        nombre: rewardsCellSafe(rewardsCleanName((customer.attributes || {}).name)),
+        // COMPLETO a propósito (review): si alguien pidió ligar un número que no
+        // es tuyo, tienes que poder verlo y NO confirmar.
+        telefono: phone,
+        url: url
+      }),
+      redirect: 'follow'
+    });
+    const j = await r.json().catch(() => null);
+    if (!j || !j.ok) {
+      console.error('[rewards] vinculo: el Ledger no mandó el correo a ' + email + ': ' + JSON.stringify(j || {}).slice(0, 200));
+      return res.status(502).json({ ok: false, error: 'no pudimos mandarte el correo; toca "Ya no tengo acceso a ese correo" y el equipo lo liga a mano' });
+    }
+    rewardsVinculoRateCobrar('e:' + email);
+    rewardsVinculoRateCobrar('t:' + phone);
+    rewardsGlobalCobrar('correo_vinculo');
+    console.log('[rewards] vinculo solicitado: correo a ' + email + ' para tel ...' + p10.slice(-4));
+    return res.json({ ok: true, mensaje: 'te mandamos un enlace a ' + email + ' — ábrelo para continuar (vence en 45 min; revisa spam)' });
+  } catch (e) {
+    console.error('[rewards] vinculo solicitar error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error consultando Booqable, intenta de nuevo' });
+  }
+});
+
+// Página HTML compartida de los pasos de vínculo (viene del correo, no del portal).
+function rewardsVinculoPagina(titulo, cuerpo) {
+  return '<!doctype html><html lang="es"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><title>' + titulo + '</title></head>' +
+    '<body style="font-family:-apple-system,system-ui,sans-serif;background:#f5f1e8;color:#2b2b2b;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0">' +
+    '<div style="max-width:420px;padding:32px;text-align:center;background:#fff;border-radius:16px;margin:16px;box-shadow:0 2px 12px rgba(0,0,0,.07)">' + cuerpo + '</div></body></html>';
+}
+const REWARDS_VINCULO_LINK_PORTAL = '<p style="margin-top:24px"><a href="https://rewards.filmorent.com" style="background:#c8102e;color:#fff;padding:12px 22px;border-radius:10px;text-decoration:none;font-weight:600">Ir al portal</a></p>';
+
+// ── GET /rewards/vincular/confirmar?t=... ───────────────────
+// SOLO pinta la página. La escritura vive en /completar, detrás del código.
+app.get('/rewards/vincular/confirmar', async (req, res) => {
+  if (!REWARDS_OTP_SECRET) return res.status(503).send(rewardsVinculoPagina('No disponible', '<h2>Servicio no disponible</h2>' + REWARDS_VINCULO_LINK_PORTAL));
+  const datos = rewardsVinculoAbrir(req.query.t);
+  if (!datos) {
+    return res.status(400).send(rewardsVinculoPagina('Enlace vencido', '<h2>Este enlace venció o no es válido</h2><p>Pide uno nuevo desde el portal (vive 45 minutos).</p>' + REWARDS_VINCULO_LINK_PORTAL));
+  }
+  // datos.t viene FIRMADO por nosotros (jamás del querystring suelto); aun así
+  // se re-sanitiza a formato de teléfono antes de interpolarse en el HTML.
+  const telLimpio = String(datos.t).replace(/[^0-9+]/g, '');
+  const cuerpo =
+    '<h2>Un paso más</h2>' +
+    '<p>Vas a ligar el celular <b style="white-space:nowrap">' + telLimpio + '</b> a tu cuenta de Filmorent Rewards.</p>' +
+    '<p style="background:#fdf0e7;border-radius:10px;padding:10px 14px;font-size:14px">⚠️ ¿Ese número <b>no</b> es tuyo? No sigas y avísanos.</p>' +
+    '<p>Te mandamos un código de WhatsApp a ese número para confirmar que es tuyo:</p>' +
+    '<button id="btnCodigo" style="background:#c8102e;color:#fff;padding:12px 22px;border-radius:10px;border:0;font-weight:600;font-size:16px;cursor:pointer">M&aacute;ndame el c&oacute;digo</button>' +
+    '<form id="formCodigo" style="display:none;margin-top:16px" onsubmit="return completar(event)">' +
+    '<input id="code" inputmode="numeric" maxlength="6" placeholder="123456" style="text-align:center;letter-spacing:6px;font-size:20px;padding:10px;border:1px solid #ddd;border-radius:10px;width:180px"><br>' +
+    '<button type="submit" style="margin-top:12px;background:#c8102e;color:#fff;padding:12px 22px;border-radius:10px;border:0;font-weight:600;font-size:16px;cursor:pointer">Confirmar</button>' +
+    '</form>' +
+    '<p id="msg" style="min-height:20px;font-size:14px;color:#8a6d3b"></p>' +
+    '<script>' +
+    // El token ya pasó la firma HMAC (charset base64url), pero por defensa en
+    // profundidad se escapa '<' para que jamás pueda romper el contexto
+    // <script> (review: JSON.stringify no escapa '</script>').
+    'var t=' + JSON.stringify(String(req.query.t)).replace(/</g, '\\u003c') + ';' +
+    'var msg=document.getElementById("msg");' +
+    'document.getElementById("btnCodigo").onclick=function(){var b=this;b.disabled=true;b.textContent="Enviando…";' +
+    'fetch("/rewards/vincular/otp",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({t:t})})' +
+    '.then(function(r){return r.json()}).then(function(j){' +
+    'if(j.ok){msg.textContent="Código enviado — revisa tu WhatsApp.";document.getElementById("formCodigo").style.display="block";document.getElementById("code").focus();b.textContent="Mandar otro código";b.disabled=false;}' +
+    'else{msg.textContent=j.error||"No pudimos mandar el código.";b.textContent="Reintentar";b.disabled=false;}' +
+    '}).catch(function(){msg.textContent="Error de red, intenta de nuevo.";b.textContent="Reintentar";b.disabled=false;});};' +
+    'function completar(ev){ev.preventDefault();var code=document.getElementById("code").value.replace(/\\D/g,"");' +
+    'if(code.length!==6){msg.textContent="El código es de 6 dígitos.";return false;}' +
+    'fetch("/rewards/vincular/completar",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({t:t,code:code})})' +
+    '.then(function(r){return r.json()}).then(function(j){' +
+    'if(j.ok){document.body.innerHTML=' + JSON.stringify(rewardsVinculoPagina('Listo', '<h2>✅ Listo</h2><p>Tu celular quedó ligado a tu cuenta de Filmorent Rewards.</p><p>Ya puedes entrar al portal pidiendo tu código por WhatsApp.</p>' + REWARDS_VINCULO_LINK_PORTAL)) + ';}' +
+    'else{msg.textContent=j.error||"Código incorrecto.";}' +
+    '}).catch(function(){msg.textContent="Error de red, intenta de nuevo.";});return false;}' +
+    '<\/script>';
+  return res.send(rewardsVinculoPagina('Liga tu celular', cuerpo));
+});
+
+// ── POST /rewards/vincular/otp  {t} ─────────────────────────
+// Manda el código al CELULAR NUEVO del token. Prueba de posesión del teléfono.
+app.post('/rewards/vincular/otp', async (req, res) => {
+  if (!REWARDS_OTP_SECRET || !RESPONDIO_API_KEY) return res.status(503).json({ ok: false, error: 'servicio no disponible' });
+  const datos = rewardsVinculoAbrir((req.body || {}).t);
+  if (!datos) return res.status(400).json({ ok: false, error: 'el enlace venció; pide uno nuevo desde el portal' });
+  const firma = String((req.body || {}).t).split('.')[1];
+  const digitos = String(datos.t).replace(/\D/g, '');
+  if (rewardsVinculosUsados.has(firma)) return res.status(400).json({ ok: false, error: 'este enlace ya se usó; entra al portal con tu celular' });
+  // 'c:' frena por enlace; 'vd:' frena por TELÉFONO DESTINO sin importar
+  // cuántos tokens tenga el solicitante (review: spam de plantilla a números
+  // arbitrarios usando la cuenta propia).
+  if (rewardsVinculoRateLleno('c:' + firma) || rewardsVinculoRateLleno('vd:' + digitos)) {
+    return res.status(429).json({ ok: false, error: 'ya te mandamos varios códigos; espera una hora' });
+  }
+  if (rewardsGlobalLleno('otp', 60)) {
+    return res.status(503).json({ ok: false, error: 'estamos mandando muchos códigos; intenta en unos minutos' });
+  }
+  try {
+    // México SIEMPRE con las dos formas (+52 y el viejo +521), aunque el
+    // cliente lo haya tecleado con lada — 2ª verificación: confiar solo en
+    // digitos.length dejaba a los '+52...' sin el fallback +521 y el doble
+    // canal se atoraba con 502 dependiendo del FORMATO que usara el cliente.
+    const p10v = digitos.slice(-10);
+    const esMx = digitos.length === 10 ||
+      (digitos.length === 12 && digitos.slice(0, 2) === '52') ||
+      (digitos.length === 13 && digitos.slice(0, 3) === '521');
+    const idents = esMx
+      ? ['phone:+52' + p10v, 'phone:+521' + p10v]
+      : ['phone:+' + digitos];
+    const nodeCrypto = require('crypto');
+    const code = String(nodeCrypto.randomInt(0, 1000000)).padStart(6, '0');
+    rewardsVinculoCodigos.set(firma, { code: code, exp: Date.now() + REWARDS_OTP_TTL_MS, intentos: 0 });
+    if (rewardsVinculoCodigos.size > 2000) {
+      for (const [k, v] of rewardsVinculoCodigos) { if (v.exp < Date.now()) rewardsVinculoCodigos.delete(k); }
+    }
+    const envio = await rewardsEnviarCodigo(idents, code);
+    if (!envio.ok) {
+      rewardsVinculoCodigos.delete(firma);
+      console.error('[rewards] vinculo otp no enviado a ...' + digitos.slice(-4) + ': ' + envio.error);
+      return res.status(502).json({ ok: false, error: 'no pudimos mandar el WhatsApp a ese número — revisa que sea correcto o avísale al equipo desde el portal' });
+    }
+    rewardsVinculoRateCobrar('c:' + firma);
+    rewardsVinculoRateCobrar('vd:' + digitos);
+    rewardsGlobalCobrar('otp');
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[rewards] vinculo otp error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error enviando el código, intenta de nuevo' });
+  }
+});
+
+// ── POST /rewards/vincular/completar  {t, code} ─────────────
+// Con las dos pruebas (buzón + celular) se escribe la property en Booqable.
+app.post('/rewards/vincular/completar', async (req, res) => {
+  if (!REWARDS_OTP_SECRET) return res.status(503).json({ ok: false, error: 'servicio no disponible' });
+  const datos = rewardsVinculoAbrir((req.body || {}).t);
+  if (!datos) return res.status(400).json({ ok: false, error: 'el enlace venció; pide uno nuevo desde el portal' });
+  const firma = String((req.body || {}).t).split('.')[1];
+  if (rewardsVinculosUsados.has(firma)) return res.status(400).json({ ok: false, error: 'este enlace ya se usó; entra al portal con tu celular' });
+  const code = String((req.body || {}).code || '').replace(/\D/g, '');
+  const reg = rewardsVinculoCodigos.get(firma);
+  if (!reg || Date.now() > reg.exp) {
+    rewardsVinculoCodigos.delete(firma);
+    return res.status(400).json({ ok: false, error: 'el código venció, pide uno nuevo' });
+  }
+  reg.intentos++;
+  if (reg.intentos > REWARDS_OTP_MAX_INTENTOS) {
+    rewardsVinculoCodigos.delete(firma);
+    return res.status(429).json({ ok: false, error: 'demasiados intentos, pide un código nuevo' });
+  }
+  const nodeCrypto = require('crypto');
+  const a = Buffer.from(code); const b = Buffer.from(reg.code);
+  if (a.length !== b.length || !nodeCrypto.timingSafeEqual(a, b)) {
+    return res.status(401).json({ ok: false, error: 'código incorrecto' });
+  }
+  try {
+    const customer = await rewardsCustomerById(datos.c);
+    if (!customer || (customer.attributes || {}).archived) {
+      return res.status(404).json({ ok: false, error: 'no encontramos tu cuenta; avísale al equipo desde el portal' });
+    }
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customer.id)) {
+      return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
+    }
+    const props = (customer.attributes || {}).properties || {};
+    const p10 = String(datos.t).replace(/\D/g, '').slice(-10);
+    const yaLigado = [props.phone, props.phone_2].some(t => String(t || '').replace(/\D/g, '').slice(-10) === p10);
+    if (!yaLigado) {
+      let campo = null;
+      if (!props.phone) campo = 'Phone';
+      else if (!props.phone_2) campo = 'Phone 2';
+      if (!campo) {
+        return res.status(409).json({ ok: false, error: 'tu cuenta ya tiene 2 teléfonos; avísale al equipo desde el portal' });
+      }
+      await booqableWrite('POST', '/properties', {
+        data: {
+          type: 'properties',
+          attributes: {
+            name: campo, property_type: 'phone', value: datos.t,
+            owner_id: customer.id, owner_type: 'customers'
+          }
+        }
+      });
+    }
+    rewardsVinculoCodigos.delete(firma);
+    rewardsVinculosUsados.set(firma, datos.exp);
+    for (const [k, v] of rewardsVinculosUsados) { if (Date.now() > v) rewardsVinculosUsados.delete(k); }
+    console.log('[rewards] vinculo COMPLETADO: tel ...' + p10.slice(-4) + ' -> ficha ' + customer.id.slice(0, 8));
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[rewards] vinculo completar error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'algo falló de nuestro lado; intenta en un minuto' });
+  }
+});
+
+// ── POST /rewards/vincular/staff  {nombre, phone, email} ────
+// El cliente ya no tiene acceso al correo registrado (el caso Christian:
+// se lo dieron de baja en su empresa). Queda la solicitud en el Ledger y
+// el equipo verifica identidad ANTES de tocar la ficha — aquí no se
+// escribe nada a Booqable.
+app.post('/rewards/vincular/staff', async (req, res) => {
+  if (!REWARDS_SHEETS_URL || !process.env.REWARDS_HITOS_KEY) return res.status(503).json({ ok: false, error: 'solicitudes deshabilitadas (Ledger no configurado)' });
+  const nombre = String((req.body || {}).nombre || '').trim().slice(0, 120);
+  const emailDicho = String((req.body || {}).email || '').trim().toLowerCase().slice(0, 120);
+  const phone = rewardsVinculoPhone((req.body || {}).phone);
+  if (!nombre || nombre.length < 3) return res.status(400).json({ ok: false, error: 'escribe tu nombre completo' });
+  if (!phone) return res.status(400).json({ ok: false, error: REWARDS_VINCULO_MSG_TEL });
+  if (rewardsVinculoRateLleno('s:' + phone)) {
+    return res.status(429).json({ ok: false, error: 'ya recibimos tu solicitud; el equipo te contacta en horario hábil' });
+  }
+  if (rewardsGlobalLleno('solicitud_staff', 30)) {
+    return res.status(503).json({ ok: false, error: 'estamos recibiendo muchas solicitudes; intenta más tarde' });
+  }
+  try {
+    const r = await fetch(REWARDS_SHEETS_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tipo: 'solicitud_vinculo', k: process.env.REWARDS_HITOS_KEY,
+        nombre: rewardsCellSafe(nombre),
+        email: rewardsCellSafe(emailDicho),
+        telefono: rewardsCellSafe(phone),
+        dispositivo: rewardsCellSafe(String(req.headers['user-agent'] || '').slice(0, 150))
+      }),
+      redirect: 'follow'
+    });
+    const j = await r.json().catch(() => null);
+    if (!j || !j.ok) {
+      console.error('[rewards] solicitud staff no registrada: ' + JSON.stringify(j || {}).slice(0, 200));
+      return res.status(502).json({ ok: false, error: 'no pudimos registrar la solicitud, intenta de nuevo en un minuto' });
+    }
+    rewardsVinculoRateCobrar('s:' + phone);
+    rewardsGlobalCobrar('solicitud_staff');
+    console.log('[rewards] solicitud staff: ' + nombre + ' tel ...' + phone.slice(-4));
+    return res.json({ ok: true, mensaje: 'listo — el equipo verifica tus datos y liga tu número en horario hábil; te avisan por WhatsApp' });
+  } catch (e) {
+    console.error('[rewards] solicitud staff error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'no pudimos registrar la solicitud, intenta de nuevo' });
   }
 });
 
