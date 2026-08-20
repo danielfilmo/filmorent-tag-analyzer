@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.32.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.34.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1484,6 +1484,12 @@ function rewardsVigencia(fechasAsc, ahoraMs) {
   for (const f of fechasAsc) {
     const t = new Date(f).getTime();
     if (isNaN(t)) continue;
+    // Solo las rentas YA OCURRIDAS mueven el reloj. Sin este filtro, una reserva
+    // agendada a más de 183 días se leía como "hueco de inactividad" y ponía
+    // vivo_desde en el FUTURO, borrando todos los puntos ya ganados del cliente
+    // (auditoría 19-ago-2026: nadie lo había sufrido aún, pero era cuestión de
+    // que alguien reservara un rodaje lejano).
+    if (t > ahoraMs) continue;
     if (t > reloj) {
       if (t - reloj > GAP) vivoDesde = f;   // hubo hueco: lo anterior caduca
       reloj = t;
@@ -3189,10 +3195,22 @@ app.post('/rewards/atribuir', async (req, res) => {
   const body = req.body || {};
   const selfService = String(body.canal || '') === 'cliente';
   let quienRegistra = 'cliente (self-service)';
+  // Sesión del cliente para la rama self-service. HASTA v8.32 esta rama NO pedía
+  // credencial alguna: como los números de orden son consecutivos y un email no
+  // es secreto, cualquiera podía atribuirse los puntos de una renta ajena y
+  // canjearlos (auditoría 19-ago-2026). Ahora exige el token OTP y que el
+  // beneficiario sea una de las cuentas de esa sesión (se valida abajo, cuando
+  // ya se resolvió el beneficiario por email o QR).
+  let sesionCliente = null;
   if (!selfService) {
     const staff = await rewardsStaffFrom(req);
     if (rewardsStaffDenied(res, staff)) return;
     quienRegistra = staff;
+  } else {
+    sesionCliente = rewardsSesionDe(req);
+    if (!sesionCliente) {
+      return res.status(401).json({ ok: false, error: 'entra a tu cuenta para reclamar los puntos de una renta' });
+    }
   }
   // La vista previa es herramienta del MOSTRADOR (con staff autenticado). En
   // self-service sería un oráculo silencioso: consultar titulares de órdenes
@@ -3226,6 +3244,13 @@ app.post('/rewards/atribuir', async (req, res) => {
     }
     if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(beneficiario.id)) {
       return res.status(403).json({ ok: false, error: 'esa cuenta no participa en Filmorent Rewards' });
+    }
+    // El cliente solo puede acreditarse puntos A SÍ MISMO: el beneficiario tiene
+    // que ser una de las cuentas de su propia sesión (mismo patrón que
+    // /rewards/member?customer_id=). El mostrador sí puede acreditar a terceros
+    // porque ahí hay un humano identificado que responde por el movimiento.
+    if (selfService && sesionCliente.ids.indexOf(beneficiario.id) === -1) {
+      return res.status(403).json({ ok: false, error: 'solo puedes reclamar los puntos para tu propia cuenta' });
     }
 
     // 2) la orden: debe existir, no estar cancelada ni ser venta de equipo
