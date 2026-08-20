@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.34.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.35.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1811,6 +1811,7 @@ async function rewardsLedgerSummary(customerId, email) {
     if (!j || j.ok === false) return null;
     return {
       exclusion: j.exclusion || null,   // tab Exclusiones: {nivel:'bloqueado'|'adeudo', motivo}
+      cupones: j.cupones || [],         // crédito promocional en pesos (tab Cupones)
       redeemed_points: j.redeemed_points || 0,
       redemptions: j.redemptions || [],
       // 28-jul: órdenes de otros que este miembro pidió (suman) y órdenes propias
@@ -1831,6 +1832,38 @@ async function rewardsLedgerSummary(customerId, email) {
 // las excepciones son adeudos reales, no basura de captura). La cancelación
 // definitiva a 60 días NO es automática: la confirma Suheidi (dato irreversible).
 // Devuelve null si puede canjear, o {status, error} para responder el 409.
+// Fecha de HOY en Monterrey (UTC-6) como 'YYYY-MM-DD' — para vencer cupones
+// con el mismo criterio de día que usa el contador de visitas.
+function rewardsHoyMty() {
+  return new Date(Date.now() - 6 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+// De la lista cruda de cupones del Ledger deja SOLO los usables hoy: estado
+// 'activo' y (sin vencimiento O vence >= hoy MTY). El server manda estos al
+// portal y valida contra ellos al aplicar — nunca confía en el vencimiento del
+// cliente. Ordena por monto desc (el más grande primero).
+function rewardsCuponesVigentes(cupones) {
+  const hoy = rewardsHoyMty();
+  // Normaliza el vencimiento a 'YYYY-MM-DD'. El Apps Script ya lo formatea así,
+  // pero si Sheets coacciona la celda a Date y llega "Wed Sep 30 2026…", el
+  // slice(0,10) da "Wed Sep 30" — que es < hoy alfabéticamente → se trata como
+  // VENCIDO (fail-closed, nunca eterno). Defensa del hallazgo del 19-ago.
+  const venceNorm = (v) => (v ? String(v).slice(0, 10) : null);
+  return (cupones || [])
+    .filter(c => c && String(c.estado || '').toLowerCase() === 'activo')
+    .filter(c => { const v = venceNorm(c.vence); return !v || v >= hoy; })
+    .map(c => ({
+      cupon_id: c.cupon_id,
+      monto_cents: Number(c.monto_cents) || 0,
+      monto_mxn: (Number(c.monto_cents) || 0) / 100,
+      campana: c.campana || '',
+      condicion: c.condicion || '',
+      vence: venceNorm(c.vence)
+    }))
+    .filter(c => c.monto_cents > 0)
+    .sort((a, b) => b.monto_cents - a.monto_cents);
+}
+
 function rewardsCandadoCanje(ledger, earnedOrders) {
   const excl = ledger && ledger.exclusion;
   if (excl && excl.nivel === 'bloqueado') {
@@ -1861,6 +1894,12 @@ async function rewardsLedgerWrite(row) {
   if (!REWARDS_SHEETS_URL) return false;
   const safe = {};
   Object.keys(row || {}).forEach(k => { safe[k] = rewardsCellSafe(row[k]); });
+  // La clave del Ledger viaja en TODA escritura (canje, scan, aplicar, notif,
+  // atribucion, cupones): con ella el candado global keyOk_ del Apps Script
+  // rechaza cualquier POST anónimo. Cierra el hallazgo ALTA de la auditoría
+  // 19-ago-2026 (el doPost aceptaba escrituras sin clave). No sobrescribe una
+  // k ya puesta por el llamador.
+  if (safe.k === undefined && process.env.REWARDS_HITOS_KEY) safe.k = process.env.REWARDS_HITOS_KEY;
   try {
     const r = await fetch(REWARDS_SHEETS_URL, {
       method: 'POST',
@@ -1874,6 +1913,27 @@ async function rewardsLedgerWrite(row) {
   } catch (e) {
     console.error('rewards ledger write error: ' + e.message);
     return false;
+  }
+}
+
+// Como rewardsLedgerWrite pero DEVUELVE el JSON parseado del Ledger (no un
+// booleano) — para operaciones que necesitan leer la respuesta, p.ej. el claim
+// atómico de un cupón (updated:true/false decide si se puede tocar Booqable).
+async function rewardsLedgerCall(row) {
+  if (!REWARDS_SHEETS_URL) return null;
+  const safe = {};
+  Object.keys(row || {}).forEach(k => { safe[k] = rewardsCellSafe(row[k]); });
+  if (safe.k === undefined && process.env.REWARDS_HITOS_KEY) safe.k = process.env.REWARDS_HITOS_KEY;
+  try {
+    const r = await fetch(REWARDS_SHEETS_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(safe), redirect: 'follow'
+    });
+    if (!r.ok) { console.error('rewards ledger call failed: ' + r.status); return null; }
+    return await r.json().catch(() => null);
+  } catch (e) {
+    console.error('rewards ledger call error: ' + e.message);
+    return null;
   }
 }
 
@@ -1913,6 +1973,9 @@ async function rewardsBuildMember(customer) {
       // exclusión vigente (tab Exclusiones del Ledger) — el portal la ignora;
       // el mostrador la puede mostrar para que el staff sepa el motivo
       exclusion: (ledger && ledger.exclusion) || null,
+      // cupones promocionales VIGENTES (crédito en pesos, con su propio
+      // vencimiento y condición); el portal los pinta junto a los puntos.
+      cupones: rewardsCuponesVigentes(ledger && ledger.cupones),
       // vigencia §6: limite = fecha en que caduca el saldo si no vuelve a rentar
       vigencia: earned.vigencia || null,
       member_since: a.created_at,
@@ -3084,6 +3147,233 @@ app.post('/rewards/pagar', async (req, res) => {
   }
 });
 
+// ── Cupones / crédito promocional (19-ago-2026) ─────────────
+// Un cupón es crédito en PESOS con vencimiento y condición propios, distinto de
+// los puntos. Se emite por campaña (estudio, estreno FX5, win-back…), vive en el
+// portal del cliente, y se aplica en mostrador como el pago con puntos — pero sin
+// gastar puntos. Nace del hallazgo de la auditoría: un descuento a mano en
+// Booqable no descuenta nada ni se puede medir; un cupón sí.
+
+// slug corto y seguro para meterlo en el id del cupón
+function rewardsSlug(s) {
+  return String(s || 'promo').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24) || 'promo';
+}
+
+// POST /rewards/cupon/emitir  — emite un cupón para un cliente.
+// Auth: staff autenticado O la clave de administración (k === HITOS_KEY), para
+// poder emitir campañas de forma programática desde una sesión de operación.
+// Body: { email|code, monto_cents, campana, condicion?, vence? (YYYY-MM-DD), notas? }
+app.post('/rewards/cupon/emitir', async (req, res) => {
+  const body = req.body || {};
+  const adminKey = process.env.REWARDS_HITOS_KEY && String(body.k || '') === process.env.REWARDS_HITOS_KEY;
+  let quienEmite = 'admin (clave)';
+  if (!adminKey) {
+    const staff = await rewardsStaffFrom(req);
+    if (rewardsStaffDenied(res, staff)) return;
+    quienEmite = staff;
+  }
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'cupones deshabilitados (Ledger no configurado)' });
+  const montoCents = parseInt(body.monto_cents, 10);
+  if (!Number.isFinite(montoCents) || montoCents <= 0) return res.status(400).json({ ok: false, error: 'monto_cents invalido' });
+  const campana = String(body.campana || '').trim();
+  if (!campana) return res.status(400).json({ ok: false, error: 'falta campana' });
+  const vence = String(body.vence || '').trim();
+  if (vence && !/^\d{4}-\d{2}-\d{2}$/.test(vence)) return res.status(400).json({ ok: false, error: 'vence debe ser YYYY-MM-DD' });
+  if (vence && vence < rewardsHoyMty()) return res.status(400).json({ ok: false, error: 'la fecha de vencimiento ya paso' });
+  try {
+    // resolver al cliente por email o por QR
+    const code = String(body.code || '').trim().toUpperCase();
+    const email = String(body.email || '').trim().toLowerCase();
+    let customer = null;
+    if (email && email.indexOf('@') !== -1) {
+      customer = await rewardsFindCustomer(email);
+    } else if (code) {
+      const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
+      if (stale) await rewardsBuildQrIndex();
+      const hit = rewardsQrIndex.get(code);
+      if (rewardsQrAmbiguous[code]) return res.status(409).json({ ok: false, error: 'codigo ambiguo, usa el email' });
+      if (hit) { const cd = await booqableGet('/customers/' + hit.id); customer = cd.data; }
+    } else {
+      return res.status(400).json({ ok: false, error: 'manda email o code del cliente' });
+    }
+    if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email/codigo' });
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customer.id)) {
+      return res.status(403).json({ ok: false, error: 'esa cuenta no participa en Filmorent Rewards' });
+    }
+    const cuponId = 'CUP-' + rewardsSlug(campana).toUpperCase() + '-' +
+      Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
+    const wrote = await rewardsLedgerWrite({
+      tipo: 'cupon_emitir',
+      cupon_id: cuponId,
+      fecha: new Date().toISOString(),
+      customer_id: customer.id,
+      email: (customer.attributes || {}).email || '',
+      nombre: rewardsCleanName((customer.attributes || {}).name),
+      monto_cents: montoCents,
+      campana: campana,
+      condicion: String(body.condicion || '').trim(),
+      vence: vence,
+      emitido_por: quienEmite,
+      notas: String(body.notas || '').trim()
+    });
+    if (!wrote) return res.status(502).json({ ok: false, error: 'no se pudo escribir el cupon al Ledger' });
+    console.log('[rewards] cupon emitido ' + cuponId + ' ' + rewardsFormatMXN(montoCents) + ' -> ' +
+      ((customer.attributes || {}).email || customer.id) + ' (' + campana + ', vence ' + (vence || 'sin fecha') + ')');
+    return res.json({
+      ok: true, cupon_id: cuponId, monto_mxn: montoCents / 100, campana: campana,
+      condicion: String(body.condicion || '').trim() || null, vence: vence || null,
+      cliente: rewardsCleanName((customer.attributes || {}).name)
+    });
+  } catch (e) {
+    console.error('[rewards] cupon emitir error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error emitiendo el cupon' });
+  }
+});
+
+// POST /rewards/cupon/aplicar  — aplica un cupón a una orden (mostrador).
+// Auth: staff (mueve dinero en Booqable). Body: { email|code, cupon_id, order_number }.
+app.post('/rewards/cupon/aplicar', async (req, res) => {
+  const body = req.body || {};
+  const staffPagar = await rewardsStaffFrom(req);
+  if (rewardsStaffDenied(res, staffPagar)) return;
+  const code = String(body.code || '').trim().toUpperCase();
+  const email = String(body.email || '').trim().toLowerCase();
+  const cuponId = String(body.cupon_id || '').trim();
+  const orderNumber = parseInt(body.order_number, 10);
+  if (!cuponId) return res.status(400).json({ ok: false, error: 'falta cupon_id' });
+  if (!Number.isFinite(orderNumber)) return res.status(400).json({ ok: false, error: 'order_number invalido' });
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'cupones deshabilitados (Ledger no configurado)' });
+  try {
+    // 1) el miembro
+    let customerId = null;
+    if (code) {
+      const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
+      if (stale) await rewardsBuildQrIndex();
+      let hit = rewardsQrIndex.get(code);
+      if (!hit && !stale) { await rewardsBuildQrIndex(); hit = rewardsQrIndex.get(code); }
+      if (rewardsQrAmbiguous[code]) return res.status(409).json({ ok: false, error: 'codigo ambiguo, identifica al miembro por email' });
+      if (!hit) return res.status(404).json({ ok: false, error: 'codigo no encontrado' });
+      customerId = hit.id;
+    } else if (email && email.indexOf('@') !== -1) {
+      const c = await rewardsFindCustomer(email);
+      if (!c) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
+      customerId = c.id;
+    } else {
+      return res.status(400).json({ ok: false, error: 'manda code (QR) o email del miembro' });
+    }
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customerId)) {
+      return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
+    }
+    const cd = await booqableGet('/customers/' + customerId);
+    const customer = cd.data;
+
+    // 2) el cupón: tiene que ser suyo, vigente y no usado. El server NO confía en
+    //    el cliente: relee el Ledger y valida contra los cupones vigentes reales.
+    //    El candado de adeudo usa las órdenes REALES (igual que /pagar), para que
+    //    el proxy automático de Booqable (stopped>30d sin pagar) también cuente.
+    const earnedCup = await rewardsComputeEarned(customerId);
+    const ledger = await rewardsLedgerSummary(customerId, ((customer || {}).attributes || {}).email);
+    if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
+    const candadoCup = rewardsCandadoCanje(ledger, earnedCup.orders);
+    if (candadoCup) return res.status(candadoCup.status).json({ ok: false, error: candadoCup.error });
+    const vigentes = rewardsCuponesVigentes(ledger.cupones);
+    const cupon = vigentes.find(c => c.cupon_id === cuponId);
+    if (!cupon) {
+      // distinguir "no es tuyo/no existe" de "ya usado/vencido" para un mensaje claro
+      const crudo = (ledger.cupones || []).find(c => c.cupon_id === cuponId);
+      if (crudo && String(crudo.estado).toLowerCase() === 'usado') return res.status(409).json({ ok: false, error: 'ese cupon ya se uso' });
+      if (crudo) return res.status(409).json({ ok: false, error: 'ese cupon ya no esta vigente (vencido o cancelado)' });
+      return res.status(404).json({ ok: false, error: 'ese cupon no existe o no es de esta cuenta' });
+    }
+
+    // 3) la orden destino — mismas reglas que el pago con puntos (§4)
+    if (REWARDS_EXCLUDED_ORDER_NUMBERS.has(orderNumber)) {
+      return res.status(409).json({ ok: false, error: 'los creditos Rewards aplican solo en rentas, no en ventas de equipo' });
+    }
+    const od = await booqableGet('/orders?filter[number]=' + orderNumber + '&page[size]=2');
+    const order = (od.data || [])[0];
+    if (!order) return res.status(404).json({ ok: false, error: 'no existe la orden #' + orderNumber });
+    const oa = order.attributes || {};
+    if (oa.status === 'canceled') return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' esta cancelada' });
+    if (oa.status === 'started' || oa.status === 'stopped') {
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + (oa.status === 'started' ? ' ya esta en curso' : ' ya termino') + ': el credito aplica solo en rentas nuevas, antes de facturar' });
+    }
+    if (oa.payment_status === 'paid') return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el credito se aplica antes del pago' });
+    const totalWithTax = oa.grand_total_with_tax_in_cents || 0;
+    if (totalWithTax < cupon.monto_cents * 2) {
+      return res.status(409).json({ ok: false, error: 'la orden debe ser de al menos ' + rewardsFormatMXN(cupon.monto_cents * 2) + ' (2x el cupon de ' + rewardsFormatMXN(cupon.monto_cents) + '); total actual con IVA: ' + rewardsFormatMXN(totalWithTax) });
+    }
+    const ld = await booqableGet('/lines?filter[order_id]=' + order.id + '&page[size]=100');
+    const lineasOrden = (ld.data || []).filter(l => !((l.attributes || {}).archived));
+    const yaTiene = lineasOrden.some(l => String((l.attributes || {}).title || '').toLowerCase().indexOf('filmorent rewards') === 0);
+    if (yaTiene) return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene un credito Rewards aplicado' });
+    const esVenta = lineasOrden.some(l => {
+      const t = String((l.attributes || {}).title || '').toLowerCase().trim();
+      return t.indexOf('venta ') === 0 || t.indexOf('venta-') === 0 || t.indexOf('venta:') === 0;
+    });
+    if (esVenta) return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' incluye venta de equipo: los creditos Rewards aplican solo en rentas' });
+    // condición del cupón: si dice 'estudio', la orden debe traer una línea de estudio
+    const condicion = String(cupon.condicion || '').toLowerCase();
+    if (condicion.indexOf('estudio') !== -1) {
+      const tieneEstudio = lineasOrden.some(l => {
+        const t = String((l.attributes || {}).title || '').toLowerCase();
+        return t.indexOf('estudio') !== -1 && t.indexOf('encargado') === -1;
+      });
+      if (!tieneEstudio) return res.status(409).json({ ok: false, error: 'este cupon es solo para renta de estudio: la orden #' + orderNumber + ' no incluye estudio' });
+    }
+
+    // 4) CLAIM-FIRST: reclamar el cupón en el Ledger ANTES de tocar Booqable.
+    //    El LockService del .gs hace el marcado atómico; solo si updated===true
+    //    (pasó de 'activo' a 'usado' en ESTA llamada) seguimos. Así un doble
+    //    clic o dos cajas simultáneas NO producen dos descuentos: la 2ª ve
+    //    updated:false y se rechaza sin mover dinero. Si el Ledger no confirma,
+    //    NADA se aplica en Booqable (revisión adversarial 19-ago-2026).
+    const claim = await rewardsLedgerCall({
+      tipo: 'cupon_usar', cupon_id: cupon.cupon_id,
+      order_number: String(orderNumber), staff_name: staffPagar || 'mostrador'
+    });
+    if (!claim || claim.ok === false) {
+      return res.status(502).json({ ok: false, error: 'no se pudo registrar el cupon, intenta de nuevo (no se aplico ningun descuento)' });
+    }
+    if (claim.updated === false) {
+      return res.status(409).json({ ok: false, error: 'ese cupon ya se uso' });
+    }
+
+    // 5) ya reclamado: aplicar el descuento en Booqable. Si esto falla, el cupón
+    //    queda 'usado' sin descuento (recuperable a mano) — preferible a fugar dinero.
+    const etiqueta = 'Filmorent Rewards - promo ' + rewardsFormatMXN(cupon.monto_cents) + ' (' + cupon.cupon_id + ')';
+    try {
+      await booqableWrite('POST', '/lines', {
+        data: { type: 'lines', attributes: {
+          owner_id: order.id, owner_type: 'orders', title: etiqueta,
+          quantity: 1, price_each_in_cents: -cupon.monto_cents
+        } }
+      });
+    } catch (eBq) {
+      console.error('[rewards] cupon ' + cupon.cupon_id + ' RECLAMADO pero fallo Booqable: ' + eBq.message);
+      return res.status(502).json({
+        ok: false,
+        error: 'el cupon quedo registrado pero el descuento no se aplico en Booqable (' + cupon.cupon_id +
+          '): avisa con este folio para aplicarlo a mano o liberarlo'
+      });
+    }
+
+    let nuevoTotal = null;
+    try { const od2 = await booqableGet('/orders/' + order.id); nuevoTotal = ((od2.data || {}).attributes || {}).grand_total_with_tax_in_cents; } catch (e2) { /* informativo */ }
+    console.log('[rewards] cupon aplicado ' + cupon.cupon_id + ' ' + rewardsFormatMXN(cupon.monto_cents) +
+      ' -> orden #' + orderNumber);
+    return res.json({
+      ok: true, cupon_id: cupon.cupon_id, monto_mxn: cupon.monto_cents / 100,
+      order_number: orderNumber, nuevo_total_mxn: nuevoTotal === null ? null : nuevoTotal / 100,
+      ledger_ok: true
+    });
+  } catch (e) {
+    console.error('[rewards] cupon aplicar error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error aplicando el cupon, intenta de nuevo' });
+  }
+});
+
 // ── POST /rewards/hitos-diarios?key=... ─────────────────────
 // Motor de avisos por HITOS (decisión de Daniel 1-ago-2026: WhatsApp solo cuando
 // pasa algo que le importa al cliente — cruzó un escalón de canje o subió de
@@ -3337,6 +3627,7 @@ app.post('/rewards/atribuir', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         tipo: 'atribucion',
+        k: process.env.REWARDS_HITOS_KEY,   // candado global del Ledger (auditoría 19-ago)
         fecha: new Date().toISOString(),
         order_number: String(orderNumber),
         order_id: order.id,
@@ -3541,6 +3832,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         tipo: 'aplicar',
+        k: process.env.REWARDS_HITOS_KEY,   // candado global del Ledger (auditoría 19-ago)
         folio: folio,
         order_number: orderNumber,
         staff_name: staffAplicar   // identidad verificada, no el body
