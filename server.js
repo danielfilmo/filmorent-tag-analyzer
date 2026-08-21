@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.35.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.36.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1801,11 +1801,20 @@ async function rewardsComputeEarned(customerId) {
 
 // Lee del Ledger (Apps Script doGet) los canjes de un customer.
 // Devuelve null si el Ledger no esta configurado o fallo (degradar con flag).
-async function rewardsLedgerSummary(customerId, email) {
+async function rewardsLedgerSummary(customerId, email, telefono) {
   if (!REWARDS_SHEETS_URL) return null;
   try {
-    const r = await fetch(REWARDS_SHEETS_URL + '?action=member&customer_id=' + encodeURIComponent(customerId) +
-      (email ? '&email=' + encodeURIComponent(String(email).toLowerCase()) : ''), { redirect: 'follow' });
+    // v8.36: telefono (10 dígitos) también identifica cupones — un lead sin
+    // cuenta en Booqable puede traer crédito promocional amarrado a su celular.
+    const tel10 = rewardsPhone10(telefono);
+    // Las consultas SIN customer_id exigen la clave en el Ledger v12 (un celular
+    // se adivina; un UUID no) — se manda solo en ese caso para no regar la clave
+    // en URLs donde no hace falta.
+    const kParam = (!customerId && process.env.REWARDS_HITOS_KEY)
+      ? '&k=' + encodeURIComponent(process.env.REWARDS_HITOS_KEY) : '';
+    const r = await fetch(REWARDS_SHEETS_URL + '?action=member&customer_id=' + encodeURIComponent(customerId || '') +
+      (email ? '&email=' + encodeURIComponent(String(email).toLowerCase()) : '') +
+      (tel10 ? '&telefono=' + encodeURIComponent(tel10) : '') + kParam, { redirect: 'follow' });
     if (!r.ok) return null;
     const j = await r.json().catch(() => null);
     if (!j || j.ok === false) return null;
@@ -1858,7 +1867,8 @@ function rewardsCuponesVigentes(cupones) {
       monto_mxn: (Number(c.monto_cents) || 0) / 100,
       campana: c.campana || '',
       condicion: c.condicion || '',
-      vence: venceNorm(c.vence)
+      vence: venceNorm(c.vence),
+      nombre: c.nombre || ''    // para la sesión de invitado (saludo del portal)
     }))
     .filter(c => c.monto_cents > 0)
     .sort((a, b) => b.monto_cents - a.monto_cents);
@@ -1945,7 +1955,11 @@ function rewardsCleanName(name) {
 async function rewardsBuildMember(customer) {
   const a = customer.attributes || {};
   const earned = await rewardsComputeEarned(customer.id);
-  const ledger = await rewardsLedgerSummary(customer.id, a.email);
+  // El teléfono de la ficha viaja al Ledger: si a este cliente se le emitió un
+  // cupón por celular ANTES de tener cuenta (lead recuperado), lo ve igual.
+  const pTel = (a.properties || {});
+  const telFicha = rewardsPhone10(pTel.phone || pTel.phone_2 || a.phone);
+  const ledger = await rewardsLedgerSummary(customer.id, a.email, telFicha);
   const redeemed = ledger ? ledger.redeemed_points : 0;
   // Atribuciones: en renta audiovisual quien ELIGE el proveedor (DP/freelance) no
   // siempre es quien PAGA (la productora). Si pidió que los puntos fueran suyos,
@@ -2018,6 +2032,21 @@ async function rewardsBuildMember(customer) {
 app.get('/rewards/member', async (req, res) => {
   const email = String(req.query.email || '').trim().toLowerCase();
   const porId = String(req.query.customer_id || '').trim();
+  // v8.36: vista de INVITADO — un lead con cupón por teléfono y sin cuenta.
+  // Exige sesión OTP válida (el token trae el teléfono verificado); devuelve
+  // SOLO sus cupones, nada de Booqable.
+  if (String(req.query.guest || '') === '1') {
+    const sesInv = rewardsSesionDe(req);
+    if (!sesInv || !sesInv.phone) return res.status(401).json({ ok: false, error: 'sesion invalida o vencida, vuelve a entrar' });
+    const cuponesInv = await rewardsCuponesPorTelefono(String(sesInv.phone));
+    return res.json({
+      ok: true, guest: true,
+      member: {
+        name: (cuponesInv[0] && cuponesInv[0].nombre) || 'Cliente Filmorent',
+        cupones: cuponesInv
+      }
+    });
+  }
   if (!email && !porId) return res.status(400).json({ ok: false, error: 'falta email o customer_id' });
   if (!porId && email.indexOf('@') === -1) {
     return res.status(400).json({ ok: false, error: 'email invalido' });
@@ -2321,6 +2350,26 @@ function rewardsIdentsPara(clientes, phone10) {
 }
 
 // ── POST /rewards/otp/solicitar  {phone} ────────────────────
+// Cupones VIGENTES amarrados a un teléfono (v8.36) — para que un lead que aún
+// no es cliente pueda entrar al portal y ver su crédito promocional. Devuelve
+// [] si no hay o si el Ledger falla (el login de cuentas no depende de esto).
+async function rewardsCuponesPorTelefono(phone10) {
+  if (!REWARDS_SHEETS_URL || !phone10) return [];
+  try {
+    // consulta sin customer_id → lleva la clave (Ledger v12 la exige para
+    // identidades adivinables como el celular)
+    const r = await fetch(REWARDS_SHEETS_URL + '?action=member&telefono=' + encodeURIComponent(phone10) +
+      (process.env.REWARDS_HITOS_KEY ? '&k=' + encodeURIComponent(process.env.REWARDS_HITOS_KEY) : ''), { redirect: 'follow' });
+    if (!r.ok) return [];
+    const j = await r.json().catch(() => null);
+    if (!j || j.ok === false) return [];
+    return rewardsCuponesVigentes(j.cupones);
+  } catch (e) {
+    console.error('rewards cupones por telefono error: ' + e.message);
+    return [];
+  }
+}
+
 app.post('/rewards/otp/solicitar', async (req, res) => {
   if (!REWARDS_OTP_SECRET || !RESPONDIO_API_KEY) {
     return res.status(503).json({ ok: false, error: 'login por WhatsApp deshabilitado (falta REWARDS_OTP_SECRET o RESPONDIO_API_KEY)' });
@@ -2337,8 +2386,16 @@ app.post('/rewards/otp/solicitar', async (req, res) => {
     const clientes = await rewardsCustomersByPhone(phone10);
     // Mismo criterio que el login por correo: se dice que no hay cuenta para que
     // el portal pueda ofrecer la otra puerta en vez de dejar al cliente colgado.
+    // EXCEPCIÓN v8.36: si ese celular tiene un CUPÓN vigente (lead de promo que
+    // aún no renta), sí se le manda código — entra como invitado a ver su
+    // crédito. El código llega a SU teléfono, así que no hay fuga de datos.
+    let esInvitado = false;
     if (!clientes.length) {
-      return res.status(404).json({ ok: false, error: 'no encontramos una cuenta con ese teléfono' });
+      const cuponesTel = await rewardsCuponesPorTelefono(phone10);
+      if (!cuponesTel.length) {
+        return res.status(404).json({ ok: false, error: 'no encontramos una cuenta con ese teléfono' });
+      }
+      esInvitado = true;
     }
     const nodeCrypto = require('crypto');
     const code = String(nodeCrypto.randomInt(0, 1000000)).padStart(6, '0');
@@ -2397,7 +2454,18 @@ app.post('/rewards/otp/verificar', async (req, res) => {
   rewardsOtps.delete(phone10); // un código, un uso
   try {
     const clientes = await rewardsCustomersByPhone(phone10);
-    if (!clientes.length) return res.status(404).json({ ok: false, error: 'no encontramos una cuenta con ese teléfono' });
+    if (!clientes.length) {
+      // v8.36: lead con cupón y sin cuenta → sesión de INVITADO (ids vacíos).
+      // Solo puede ver sus cupones; ninguna cuenta de Booqable se le abre.
+      const cuponesTel = await rewardsCuponesPorTelefono(phone10);
+      if (!cuponesTel.length) return res.status(404).json({ ok: false, error: 'no encontramos una cuenta con ese teléfono' });
+      const tokenInv = rewardsSesionFirmar(phone10, []);
+      console.log('[rewards] otp ok ...' + phone10.slice(-4) + ' -> INVITADO con ' + cuponesTel.length + ' cupon(es)');
+      return res.json({
+        ok: true, token: tokenInv, dias: REWARDS_SESION_DIAS, cuentas: [],
+        guest: true, nombre: (cuponesTel[0] && cuponesTel[0].nombre) || ''
+      });
+    }
     // Más rentas primero: cuando hay ficha duplicada, la buena suele ser esa.
     clientes.sort((x, y) => ((y.attributes || {}).order_count || 0) - ((x.attributes || {}).order_count || 0));
     const cuentas = clientes.map(c => {
@@ -3182,48 +3250,71 @@ app.post('/rewards/cupon/emitir', async (req, res) => {
   if (vence && !/^\d{4}-\d{2}-\d{2}$/.test(vence)) return res.status(400).json({ ok: false, error: 'vence debe ser YYYY-MM-DD' });
   if (vence && vence < rewardsHoyMty()) return res.status(400).json({ ok: false, error: 'la fecha de vencimiento ya paso' });
   try {
-    // resolver al cliente por email o por QR
+    // resolver al cliente por email, por QR o por TELÉFONO (v8.36). El teléfono
+    // permite emitirle a un lead que NUNCA ha rentado: pidió equipo, no había,
+    // se fue — y por eso mismo no tiene cuenta en Booqable. El cupón nace
+    // amarrado a su celular y cupon_usar lo liga a la cuenta cuando rente.
     const code = String(body.code || '').trim().toUpperCase();
     const email = String(body.email || '').trim().toLowerCase();
+    const tel10 = rewardsPhone10(body.telefono);
     let customer = null;
+    let soloTelefono = false;
     if (email && email.indexOf('@') !== -1) {
       customer = await rewardsFindCustomer(email);
+      if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
     } else if (code) {
       const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
       if (stale) await rewardsBuildQrIndex();
       const hit = rewardsQrIndex.get(code);
       if (rewardsQrAmbiguous[code]) return res.status(409).json({ ok: false, error: 'codigo ambiguo, usa el email' });
       if (hit) { const cd = await booqableGet('/customers/' + hit.id); customer = cd.data; }
+      if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese codigo' });
+    } else if (tel10) {
+      // si el teléfono SÍ tiene ficha, mejor amarrar a la cuenta desde ya
+      const porTel = await rewardsCustomersByPhone(tel10);
+      if (porTel.length) {
+        porTel.sort((x, y) => ((y.attributes || {}).order_count || 0) - ((x.attributes || {}).order_count || 0));
+        customer = porTel[0];
+      } else {
+        soloTelefono = true;
+        if (!String(body.nombre || '').trim()) {
+          return res.status(400).json({ ok: false, error: 'para emitir por telefono sin cuenta, manda tambien el nombre' });
+        }
+      }
     } else {
-      return res.status(400).json({ ok: false, error: 'manda email o code del cliente' });
+      return res.status(400).json({ ok: false, error: 'manda email, code o telefono del cliente' });
     }
-    if (!customer) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email/codigo' });
-    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customer.id)) {
+    if (customer && REWARDS_EXCLUDED_CUSTOMER_IDS.has(customer.id)) {
       return res.status(403).json({ ok: false, error: 'esa cuenta no participa en Filmorent Rewards' });
     }
     const cuponId = 'CUP-' + rewardsSlug(campana).toUpperCase() + '-' +
       Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
+    const nombreCupon = customer
+      ? rewardsCleanName((customer.attributes || {}).name)
+      : String(body.nombre || '').trim().slice(0, 80);
     const wrote = await rewardsLedgerWrite({
       tipo: 'cupon_emitir',
       cupon_id: cuponId,
       fecha: new Date().toISOString(),
-      customer_id: customer.id,
-      email: (customer.attributes || {}).email || '',
-      nombre: rewardsCleanName((customer.attributes || {}).name),
+      customer_id: customer ? customer.id : '',
+      email: customer ? ((customer.attributes || {}).email || '') : '',
+      nombre: nombreCupon,
       monto_cents: montoCents,
       campana: campana,
       condicion: String(body.condicion || '').trim(),
       vence: vence,
       emitido_por: quienEmite,
-      notas: String(body.notas || '').trim()
+      notas: String(body.notas || '').trim(),
+      telefono: tel10
     });
     if (!wrote) return res.status(502).json({ ok: false, error: 'no se pudo escribir el cupon al Ledger' });
     console.log('[rewards] cupon emitido ' + cuponId + ' ' + rewardsFormatMXN(montoCents) + ' -> ' +
-      ((customer.attributes || {}).email || customer.id) + ' (' + campana + ', vence ' + (vence || 'sin fecha') + ')');
+      (customer ? (((customer.attributes || {}).email) || customer.id) : ('tel ...' + tel10.slice(-4) + ' (sin cuenta aun)')) +
+      ' (' + campana + ', vence ' + (vence || 'sin fecha') + ')');
     return res.json({
       ok: true, cupon_id: cuponId, monto_mxn: montoCents / 100, campana: campana,
       condicion: String(body.condicion || '').trim() || null, vence: vence || null,
-      cliente: rewardsCleanName((customer.attributes || {}).name)
+      cliente: nombreCupon, sin_cuenta: soloTelefono || undefined
     });
   } catch (e) {
     console.error('[rewards] cupon emitir error: ' + e.message);
@@ -3259,8 +3350,18 @@ app.post('/rewards/cupon/aplicar', async (req, res) => {
       const c = await rewardsFindCustomer(email);
       if (!c) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
       customerId = c.id;
+    } else if (rewardsPhone10(body.telefono)) {
+      // v8.36: cupones emitidos a un TELÉFONO (lead sin cuenta). Al momento de
+      // aplicar, la cuenta YA debe existir — el staff la crea al armar la renta.
+      // Se busca la ficha por celular con el mismo post-filtro estricto del OTP.
+      const porTel = await rewardsCustomersByPhone(rewardsPhone10(body.telefono));
+      if (!porTel.length) {
+        return res.status(404).json({ ok: false, error: 'no hay cuenta con ese celular: primero da de alta al cliente en Booqable (con su celular en la ficha) y vuelve a intentar' });
+      }
+      porTel.sort((x, y) => ((y.attributes || {}).order_count || 0) - ((x.attributes || {}).order_count || 0));
+      customerId = porTel[0].id;
     } else {
-      return res.status(400).json({ ok: false, error: 'manda code (QR) o email del miembro' });
+      return res.status(400).json({ ok: false, error: 'manda code (QR), email o telefono del miembro' });
     }
     if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customerId)) {
       return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
@@ -3272,8 +3373,12 @@ app.post('/rewards/cupon/aplicar', async (req, res) => {
     //    el cliente: relee el Ledger y valida contra los cupones vigentes reales.
     //    El candado de adeudo usa las órdenes REALES (igual que /pagar), para que
     //    el proxy automático de Booqable (stopped>30d sin pagar) también cuente.
+    //    El teléfono de la ficha entra al lookup para que un cupón emitido por
+    //    celular (antes de que existiera la cuenta) aparezca como suyo.
     const earnedCup = await rewardsComputeEarned(customerId);
-    const ledger = await rewardsLedgerSummary(customerId, ((customer || {}).attributes || {}).email);
+    const pTelAp = ((customer || {}).attributes || {}).properties || {};
+    const telAp = rewardsPhone10(pTelAp.phone || pTelAp.phone_2 || ((customer || {}).attributes || {}).phone || body.telefono);
+    const ledger = await rewardsLedgerSummary(customerId, ((customer || {}).attributes || {}).email, telAp);
     if (!ledger) return res.status(503).json({ ok: false, error: 'no se pudo leer el Ledger, intenta mas tarde' });
     const candadoCup = rewardsCandadoCanje(ledger, earnedCup.orders);
     if (candadoCup) return res.status(candadoCup.status).json({ ok: false, error: candadoCup.error });
@@ -3331,7 +3436,11 @@ app.post('/rewards/cupon/aplicar', async (req, res) => {
     //    NADA se aplica en Booqable (revisión adversarial 19-ago-2026).
     const claim = await rewardsLedgerCall({
       tipo: 'cupon_usar', cupon_id: cupon.cupon_id,
-      order_number: String(orderNumber), staff_name: staffPagar || 'mostrador'
+      order_number: String(orderNumber), staff_name: staffPagar || 'mostrador',
+      // amarre v8.36: si el cupón nació con teléfono (sin cuenta), al usarse se
+      // le escribe la cuenta recién creada — el crédito queda en su historial
+      customer_id: customerId,
+      email: ((customer || {}).attributes || {}).email || ''
     });
     if (!claim || claim.ok === false) {
       return res.status(502).json({ ok: false, error: 'no se pudo registrar el cupon, intenta de nuevo (no se aplico ningun descuento)' });
