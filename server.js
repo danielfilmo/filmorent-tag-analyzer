@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.36.0', whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.37.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -245,6 +245,45 @@ async function logToGoogleSheets(data) {
   }
 }
 
+// ============================================================
+// v8.37: Cola de analisis para la Mac mini (migracion del Tag
+// Analyzer a local, aprobada por Daniel 25-ago-2026). El webhook
+// ENCOLA aqui ademas de analizar; la Mac consume via
+// GET /cola_analisis?key=... y confirma via POST /cola_analisis/done.
+// En fase sombra el server SIGUE analizando normal; al cortar,
+// se apaga el analisis local del server y queda solo la cola.
+// Persistencia en disco (sobrevive restarts; un deploy la limpia).
+// ============================================================
+const COLA_ANALISIS_FILE = path.join(__dirname, 'cola_analisis.json');
+let colaAnalisis = [];
+try { colaAnalisis = JSON.parse(fs.readFileSync(COLA_ANALISIS_FILE, 'utf8')); } catch (e) {}
+function colaAnalisisSave() {
+  try { fs.writeFileSync(COLA_ANALISIS_FILE, JSON.stringify(colaAnalisis)); } catch (e) {}
+}
+function colaAnalisisPush(contactId, nombre) {
+  try {
+    if (colaAnalisis.some(x => x.contactId === contactId && !x.done)) return;
+    colaAnalisis.push({ contactId: contactId, nombre: nombre || '', ts: Date.now(), done: false });
+    if (colaAnalisis.length > 500) colaAnalisis = colaAnalisis.slice(-500);
+    colaAnalisisSave();
+  } catch (e) { console.error('colaAnalisisPush: ' + e.message); }
+}
+app.get('/cola_analisis', (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || req.query.key !== process.env.REWARDS_HITOS_KEY) {
+    return res.status(403).json({ ok: false });
+  }
+  res.json({ ok: true, pendientes: colaAnalisis.filter(x => !x.done) });
+});
+app.post('/cola_analisis/done', (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || (req.body || {}).key !== process.env.REWARDS_HITOS_KEY) {
+    return res.status(403).json({ ok: false });
+  }
+  const ids = new Set(((req.body || {}).contactIds) || []);
+  colaAnalisis.forEach(x => { if (ids.has(x.contactId)) x.done = true; });
+  colaAnalisisSave();
+  res.json({ ok: true, marcados: ids.size });
+});
+
 app.post('/webhook/conversation-closed', async (req, res) => {
   console.log('\n[' + new Date().toISOString() + '] === WEBHOOK RECEIVED (v7) ===');
   console.log('Body:', JSON.stringify(req.body, null, 2));
@@ -258,6 +297,8 @@ app.post('/webhook/conversation-closed', async (req, res) => {
     console.error('Could not extract contact_id from payload.');
     return;
   }
+
+  colaAnalisisPush(contactId, contactName);   // v8.37: cola para la Mac
 
   console.log('Analyzing conversation for contact: ' + contactId + ' (' + contactName + ')');
 
