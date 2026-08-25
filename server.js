@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.37.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.38.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -3023,34 +3023,179 @@ async function rewardsBuildQrIndex() {
   console.log('[rewards] indice QR: ' + idx.size + ' miembros, ' + Object.keys(ambiguous).length + ' colisiones');
 }
 
+// ── Identificar al miembro en el mostrador: QR, correo o celular (v8.38) ──
+// Hasta v8.37 el mostrador SOLO aceptaba el código del QR. En la práctica el
+// cliente casi nunca trae el portal abierto y el staff se quedaba sin forma de
+// encontrarlo (lo preguntaron Alfredo el 20-ago y Barush el 25-ago-2026).
+// Ahora un mismo campo acepta las tres formas y el server decide cuál es por la
+// FORMA de lo capturado — el staff no tiene que elegir modo:
+//   FLM-XX-YYYY-XNXN (pegado, con guiones o en minúsculas) → código del QR
+//   cualquier cosa con @                                    → correo
+//   10 dígitos o más                                        → celular (WhatsApp)
+// El celular puede tocar 2+ fichas (23 números están compartidos en Booqable,
+// casi siempre duplicados de la misma persona): ahí NO se adivina — se regresan
+// los candidatos con 409 para que el humano del mostrador elija cuál es.
+function rewardsNormCodigoQr(raw) {
+  let s = String(raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (s.indexOf('FLM') === 0) s = s.slice(3);
+  return /^[A-Z]{2}\d{4}[A-Z]\d[A-Z]\d$/.test(s)
+    ? 'FLM-' + s.slice(0, 2) + '-' + s.slice(2, 6) + '-' + s.slice(6)
+    : '';
+}
+
+async function rewardsResolverQr(code) {
+  const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
+  if (stale) await rewardsBuildQrIndex();
+  let hit = rewardsQrIndex.get(code);
+  if (!hit && !stale) { await rewardsBuildQrIndex(); hit = rewardsQrIndex.get(code); }
+  if (rewardsQrAmbiguous[code]) {
+    return { error: { status: 409, error: 'ese codigo lo comparten dos fichas: busca al cliente por su correo o su celular' } };
+  }
+  if (!hit) return { error: { status: 404, error: 'codigo no encontrado' } };
+  return { customerId: hit.id, via: 'qr' };
+}
+
+// TODAS las fichas con ese correo, no la primera. En Booqable el correo tampoco
+// es único: medido el 25-ago-2026, 131 celulares están repetidos en 2+ fichas y
+// los duplicados suelen compartir también el correo (ficha buena + ficha
+// "NOusar…NOusar"). Devolver la primera que conteste es cómo un crédito termina
+// en el expediente equivocado, así que aquí se devuelven todas y quien decide es
+// el humano del mostrador.
+// filter[email] es exacto: si la ficha dice "Juan@Gmail.com" y el staff escribe
+// minúsculas, no aparece — por eso el respaldo con filter[q], que CONFIRMA
+// igualdad exacta en minúsculas (mismo candado que el post-filtro del teléfono).
+async function rewardsBuscarPorEmail(email) {
+  const d = await booqableGet('/customers?filter[email]=' + encodeURIComponent(email) + '&page[size]=25');
+  let hits = (d.data || []).filter(c =>
+    String(((c.attributes || {}).email) || '').trim().toLowerCase() === email);
+  if (!hits.length) {
+    const q = await booqableGet('/customers?filter[q]=' + encodeURIComponent(email) + '&page[size]=25');
+    hits = (q.data || []).filter(c =>
+      String(((c.attributes || {}).email) || '').trim().toLowerCase() === email);
+  }
+  hits = hits.filter(c => !REWARDS_EXCLUDED_CUSTOMER_IDS.has(c.id));
+  // Las fichas archivadas solo se usan si no hay ninguna viva: así el mostrador
+  // sigue encontrando al cliente viejo, pero nunca por encima de su ficha buena.
+  const vivas = hits.filter(c => !((c.attributes || {}).archived));
+  const usar = vivas.length ? vivas : hits;
+  usar.sort((x, y) => ((y.attributes || {}).order_count || 0) - ((x.attributes || {}).order_count || 0));
+  return usar;
+}
+
+function rewardsCandidatoResumen(c) {
+  const a = c.attributes || {};
+  return {
+    customer_id: c.id,
+    nombre: rewardsCleanName(a.name),
+    email: a.email || '',
+    rentas: a.order_count || 0
+  };
+}
+
+// opts.mostrador: quien pregunta es un empleado ya autenticado (Google/PIN).
+//   Solo entonces se permite buscar POR CELULAR, ver la lista de fichas
+//   candidatas y mandar un customer_id explícito. Sin esa bandera (el cliente
+//   en self-service) el celular no es una llave de búsqueda: sería un
+//   directorio de nombres y correos ajenos a un tecleo de distancia.
+// opts.telefonoMasActivo: ante duplicados por celular toma la ficha con más
+//   rentas en vez de preguntar (solo cupones: el cupón vive en el TELÉFONO, y
+//   las fichas duplicadas son la misma persona).
+async function rewardsResolverMiembro(body, opts) {
+  opts = opts || {};
+  body = body || {};
+
+  if (opts.mostrador && String(body.customer_id || '').trim()) {
+    const c = await rewardsCustomerById(String(body.customer_id).trim());
+    if (!c) return { error: { status: 404, error: 'esa ficha ya no existe en Booqable' } };
+    return { customerId: c.id, via: 'ficha' };
+  }
+
+  // `code` se sigue leyendo como texto libre a propósito: así el mostrador que
+  // ya está instalado (y el espejo de Bluehost, que sincroniza hasta las 3am)
+  // aceptan correo y celular sin esperar a que se actualice el HTML.
+  const libre = String(body.q || body.code || '').trim();
+  const qr = rewardsNormCodigoQr(libre);
+  if (qr) return rewardsResolverQr(qr);
+
+  const correo = libre.indexOf('@') !== -1
+    ? libre.toLowerCase()
+    : String(body.email || '').trim().toLowerCase();
+  if (correo && correo.indexOf('@') !== -1) {
+    const cs = await rewardsBuscarPorEmail(correo);
+    if (!cs.length) return { error: { status: 404, error: 'no hay ninguna cuenta con ese correo' } };
+    // Igual que con el celular: si el correo toca 2+ fichas, el mostrador elige.
+    // En self-service se conserva la ficha con más rentas (comportamiento que ya
+    // tenía /atribuir): el candado de sesión valida después que sea suya.
+    if (cs.length > 1 && opts.mostrador) {
+      return { error: {
+        status: 409,
+        error: 'ese correo aparece en ' + cs.length + ' fichas: dime cuál cliente es',
+        candidatos: cs.slice(0, 6).map(rewardsCandidatoResumen)
+      } };
+    }
+    return { customerId: cs[0].id, via: 'correo' };
+  }
+
+  const p10 = opts.mostrador ? rewardsPhone10(/\d/.test(libre) ? libre : body.telefono) : '';
+  if (p10) {
+    const cands = await rewardsCustomersByPhone(p10);
+    if (!cands.length) {
+      return { error: { status: 404, error: 'no hay ninguna cuenta con ese celular. Si es cliente nuevo, dalo de alta en Booqable con su celular y sus puntos empiezan a contar solos' } };
+    }
+    cands.sort((x, y) => ((y.attributes || {}).order_count || 0) - ((x.attributes || {}).order_count || 0));
+    if (cands.length > 1 && !opts.telefonoMasActivo) {
+      // Aquí solo llega el mostrador (el celular ni se calcula sin esa bandera),
+      // por eso los candidatos pueden traer nombre y correo: los está viendo un
+      // empleado identificado que tiene que elegir, no un cliente cualquiera.
+      return { error: {
+        status: 409,
+        error: 'ese celular aparece en ' + cands.length + ' fichas: dime cuál cliente es',
+        candidatos: cands.slice(0, 6).map(rewardsCandidatoResumen)
+      } };
+    }
+    return { customerId: cands[0].id, via: 'celular' };
+  }
+
+  return { error: { status: 400, error: opts.mostrador
+    ? 'escanea el QR del cliente, o escribe su correo o su celular a 10 digitos'
+    : 'manda el codigo del QR o el correo de la cuenta' } };
+}
+
+function rewardsResolverFallo(res, r) {
+  if (!r || !r.error) return false;
+  const cuerpo = { ok: false, error: r.error.error };
+  if (r.error.candidatos) cuerpo.candidatos = r.error.candidatos;
+  res.status(r.error.status).json(cuerpo);
+  return true;
+}
+
 app.post('/rewards/scan', async (req, res) => {
   const body = req.body || {};
-  const code = String(body.code || '').trim().toUpperCase();
   const staffScan = await rewardsStaffFrom(req);
   if (rewardsStaffDenied(res, staffScan)) return;
-  if (!/^FLM-[A-Z]{2}-\d{4}-[A-Z]\d[A-Z]\d$/.test(code)) {
-    return res.status(400).json({ ok: false, error: 'formato de codigo invalido (esperado FLM-XX-YYYY-XNXN)' });
-  }
   try {
-    const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
-    if (stale) await rewardsBuildQrIndex();
-    let hit = rewardsQrIndex.get(code);
-    if (!hit && !stale) { await rewardsBuildQrIndex(); hit = rewardsQrIndex.get(code); }
-    if (rewardsQrAmbiguous[code]) {
-      return res.status(409).json({ ok: false, error: 'codigo ambiguo, identifica al miembro por email' });
+    // QR, correo o celular — lo resuelve la FORMA de lo capturado (v8.38)
+    const r = await rewardsResolverMiembro(body, { mostrador: true });
+    if (rewardsResolverFallo(res, r)) return;
+    // El índice del QR ya excluye a socios/internos; correo y celular llegan
+    // directo a Booqable, así que la exclusión se revalida aquí.
+    if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(r.customerId)) {
+      return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
     }
-    if (!hit) return res.status(404).json({ ok: false, error: 'codigo no encontrado' });
 
     // resumen completo del miembro (puntos en vivo)
-    const cd = await booqableGet('/customers/' + hit.id);
+    const cd = await booqableGet('/customers/' + r.customerId);
     const customer = cd.data;
     const out = await rewardsBuildMember(customer);
+    const codeQr = rewardsQrCode(r.customerId);
 
     const logged = await rewardsLedgerWrite({
       tipo: 'scan',
       fecha: new Date().toISOString(),
-      code: code,
-      customer_id: hit.id,
+      // en el Ledger siempre queda el código del miembro, lo hayan
+      // identificado por QR, por correo o por celular
+      code: codeQr,
+      customer_id: r.customerId,
       nombre: out.member.name,
       email: out.member.email,
       order_number: body.order_number || '',
@@ -3061,8 +3206,10 @@ app.post('/rewards/scan', async (req, res) => {
       ua: rewardsClientUa(req)
     });
 
-    console.log('[rewards] scan ' + code + ' -> ' + out.member.name + ' (logged=' + logged + ')');
-    return res.json(Object.assign({ ok: true, logged: logged }, out));
+    console.log('[rewards] scan por ' + r.via + ' ' + codeQr + ' -> ' + out.member.name + ' (logged=' + logged + ')');
+    return res.json(Object.assign({
+      ok: true, logged: logged, via: r.via, customer_id: r.customerId, qr_code: codeQr
+    }, out));
   } catch (e) {
     console.error('[rewards] scan error: ' + e.message);
     return res.status(502).json({ ok: false, error: 'error resolviendo el codigo, intenta de nuevo' });
@@ -3081,31 +3228,16 @@ app.post('/rewards/pagar', async (req, res) => {
   const body = req.body || {};
   const staffPagar = await rewardsStaffFrom(req);
   if (rewardsStaffDenied(res, staffPagar)) return;
-  const code = String(body.code || '').trim().toUpperCase();
-  const email = String(body.email || '').trim().toLowerCase();
   const rewardId = parseInt(body.reward_id, 10);
   const orderNumber = parseInt(body.order_number, 10);
   if (!Number.isFinite(rewardId)) return res.status(400).json({ ok: false, error: 'recompensa invalida' });
   if (!Number.isFinite(orderNumber)) return res.status(400).json({ ok: false, error: 'order_number invalido' });
   if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'pagos con puntos deshabilitados (Ledger no configurado)' });
   try {
-    // 1) resolver al miembro por QR o por email
-    let customerId = null;
-    if (code) {
-      const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
-      if (stale) await rewardsBuildQrIndex();
-      let hit = rewardsQrIndex.get(code);
-      if (!hit && !stale) { await rewardsBuildQrIndex(); hit = rewardsQrIndex.get(code); }
-      if (rewardsQrAmbiguous[code]) return res.status(409).json({ ok: false, error: 'codigo ambiguo, identifica al miembro por email' });
-      if (!hit) return res.status(404).json({ ok: false, error: 'codigo no encontrado' });
-      customerId = hit.id;
-    } else if (email && email.indexOf('@') !== -1) {
-      const c = await rewardsFindCustomer(email);
-      if (!c) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
-      customerId = c.id;
-    } else {
-      return res.status(400).json({ ok: false, error: 'manda code (QR) o email del miembro' });
-    }
+    // 1) resolver al miembro: QR, correo o celular (v8.38)
+    const rp = await rewardsResolverMiembro(body, { mostrador: true });
+    if (rewardsResolverFallo(res, rp)) return;
+    const customerId = rp.customerId;
     if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customerId)) {
       return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
     }
@@ -3369,41 +3501,18 @@ app.post('/rewards/cupon/aplicar', async (req, res) => {
   const body = req.body || {};
   const staffPagar = await rewardsStaffFrom(req);
   if (rewardsStaffDenied(res, staffPagar)) return;
-  const code = String(body.code || '').trim().toUpperCase();
-  const email = String(body.email || '').trim().toLowerCase();
   const cuponId = String(body.cupon_id || '').trim();
   const orderNumber = parseInt(body.order_number, 10);
   if (!cuponId) return res.status(400).json({ ok: false, error: 'falta cupon_id' });
   if (!Number.isFinite(orderNumber)) return res.status(400).json({ ok: false, error: 'order_number invalido' });
   if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'cupones deshabilitados (Ledger no configurado)' });
   try {
-    // 1) el miembro
-    let customerId = null;
-    if (code) {
-      const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
-      if (stale) await rewardsBuildQrIndex();
-      let hit = rewardsQrIndex.get(code);
-      if (!hit && !stale) { await rewardsBuildQrIndex(); hit = rewardsQrIndex.get(code); }
-      if (rewardsQrAmbiguous[code]) return res.status(409).json({ ok: false, error: 'codigo ambiguo, identifica al miembro por email' });
-      if (!hit) return res.status(404).json({ ok: false, error: 'codigo no encontrado' });
-      customerId = hit.id;
-    } else if (email && email.indexOf('@') !== -1) {
-      const c = await rewardsFindCustomer(email);
-      if (!c) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
-      customerId = c.id;
-    } else if (rewardsPhone10(body.telefono)) {
-      // v8.36: cupones emitidos a un TELÉFONO (lead sin cuenta). Al momento de
-      // aplicar, la cuenta YA debe existir — el staff la crea al armar la renta.
-      // Se busca la ficha por celular con el mismo post-filtro estricto del OTP.
-      const porTel = await rewardsCustomersByPhone(rewardsPhone10(body.telefono));
-      if (!porTel.length) {
-        return res.status(404).json({ ok: false, error: 'no hay cuenta con ese celular: primero da de alta al cliente en Booqable (con su celular en la ficha) y vuelve a intentar' });
-      }
-      porTel.sort((x, y) => ((y.attributes || {}).order_count || 0) - ((x.attributes || {}).order_count || 0));
-      customerId = porTel[0].id;
-    } else {
-      return res.status(400).json({ ok: false, error: 'manda code (QR), email o telefono del miembro' });
-    }
+    // 1) el miembro: QR, correo o celular. telefonoMasActivo porque el cupón vive
+    // en el TELÉFONO (v8.36, lead sin cuenta): si ese celular tiene fichas
+    // duplicadas son la misma persona, y se toma la que más ha rentado.
+    const rc = await rewardsResolverMiembro(body, { mostrador: true, telefonoMasActivo: true });
+    if (rewardsResolverFallo(res, rc)) return;
+    const customerId = rc.customerId;
     if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(customerId)) {
       return res.status(403).json({ ok: false, error: 'esta cuenta no participa en Filmorent Rewards' });
     }
@@ -3663,25 +3772,15 @@ app.post('/rewards/atribuir', async (req, res) => {
   if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'atribuciones deshabilitadas (Ledger no configurado)' });
 
   try {
-    // 1) el beneficiario: por QR (mostrador) o por email (self-service / WhatsApp)
-    let beneficiario = null;
-    const code = String(body.code || '').trim().toUpperCase();
-    const email = String(body.email || '').trim().toLowerCase();
-    if (code) {
-      const stale = !rewardsQrIndex || (Date.now() - rewardsQrIndexAt) > 12 * 3600 * 1000;
-      if (stale) await rewardsBuildQrIndex();
-      let hit = rewardsQrIndex.get(code);
-      if (!hit && !stale) { await rewardsBuildQrIndex(); hit = rewardsQrIndex.get(code); }
-      if (rewardsQrAmbiguous[code]) return res.status(409).json({ ok: false, error: 'codigo ambiguo, usa el email' });
-      if (!hit) return res.status(404).json({ ok: false, error: 'codigo no encontrado' });
-      const cd = await booqableGet('/customers/' + hit.id);
-      beneficiario = cd.data;
-    } else if (email && email.indexOf('@') !== -1) {
-      beneficiario = await rewardsFindCustomer(email);
-      if (!beneficiario) return res.status(404).json({ ok: false, error: 'no existe cuenta con ese email' });
-    } else {
-      return res.status(400).json({ ok: false, error: 'manda el code (QR) o el email de quien acumula' });
-    }
+    // 1) el beneficiario: QR, correo o celular (v8.38). El customer_id explícito
+    // solo se acepta en el mostrador — en self-service el candado de abajo
+    // (la cuenta tiene que ser de su propia sesión) lo volvería a rechazar,
+    // pero es más limpio no ofrecer siquiera esa puerta al cliente.
+    const rb = await rewardsResolverMiembro(body, { mostrador: !selfService });
+    if (rewardsResolverFallo(res, rb)) return;
+    const cdb = await booqableGet('/customers/' + rb.customerId);
+    const beneficiario = cdb.data;
+    if (!beneficiario) return res.status(404).json({ ok: false, error: 'no se encontro esa cuenta' });
     if (REWARDS_EXCLUDED_CUSTOMER_IDS.has(beneficiario.id)) {
       return res.status(403).json({ ok: false, error: 'esa cuenta no participa en Filmorent Rewards' });
     }
