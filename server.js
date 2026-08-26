@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.39.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.40.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1468,7 +1468,8 @@ function rewardsCatalogFor(avgTicketCents) {
     prevCredit = credit;
     catalog.push({
       id: lvl.id,
-      name: 'Crédito de ' + rewardsFormatMXN(credit) + ' en tu próxima renta',
+      // 26-ago-2026 (Daniel): nunca "crédito" de cara al cliente — suena a deuda
+      name: 'Descuento de ' + rewardsFormatMXN(credit) + ' en tu próxima renta',
       points: lvl.points,
       credito_cents: credit
     });
@@ -3002,8 +3003,8 @@ app.post('/rewards/redeem', async (req, res) => {
       // el Ledger esta configurado (503 arriba si no) y el .gs manda el correo
       // de confirmacion al registrar la fila del canje
       email_confirmacion: true,
-      instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu próxima renta para aplicar tu crédito de ' +
-        credito + '. Aplica en rentas de al menos el doble del crédito; el folio no da cambio.'
+      instrucciones: 'Presenta el folio ' + folio + ' al confirmar tu próxima renta para aplicar tu descuento de ' +
+        credito + '. Aplica en rentas de al menos el doble del descuento; el folio no da cambio.'
     });
   } catch (e) {
     console.error('[rewards] redeem error: ' + e.message);
@@ -3296,7 +3297,7 @@ app.post('/rewards/pagar', async (req, res) => {
 
     // 3) la orden destino: existe, no cancelada, regla 2x, sin crédito previo
     if (REWARDS_EXCLUDED_ORDER_NUMBERS.has(orderNumber)) {
-      return res.status(409).json({ ok: false, error: 'los creditos Rewards aplican solo en rentas, no en ventas de equipo' });
+      return res.status(409).json({ ok: false, error: 'los descuentos Rewards aplican solo en rentas, no en ventas de equipo' });
     }
     const od = await booqableGet('/orders?filter[number]=' + orderNumber + '&page[size]=2');
     const order = (od.data || [])[0];
@@ -3312,18 +3313,18 @@ app.post('/rewards/pagar', async (req, res) => {
       return res.status(409).json({
         ok: false,
         error: 'la orden #' + orderNumber + (oa.status === 'started' ? ' ya esta en curso' : ' ya termino') +
-          ': el credito aplica solo en rentas nuevas, antes de facturar'
+          ': el descuento aplica solo en rentas nuevas, antes de facturar'
       });
     }
     if (oa.payment_status === 'paid') {
-      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el credito se aplica antes del pago' });
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el descuento se aplica antes del pago' });
     }
     const totalWithTax = oa.grand_total_with_tax_in_cents || 0;
     if (totalWithTax < reward.credito_cents * 2) {
       return res.status(409).json({
         ok: false,
         error: 'la orden debe ser de al menos ' + rewardsFormatMXN(reward.credito_cents * 2) +
-          ' (2x el credito de ' + rewardsFormatMXN(reward.credito_cents) + '); total actual con IVA: ' + rewardsFormatMXN(totalWithTax)
+          ' (2x el descuento de ' + rewardsFormatMXN(reward.credito_cents) + '); total actual con IVA: ' + rewardsFormatMXN(totalWithTax)
       });
     }
     const ld = await booqableGet('/lines?filter[order_id]=' + order.id + '&page[size]=100');
@@ -3331,7 +3332,7 @@ app.post('/rewards/pagar', async (req, res) => {
     const yaTiene = lineasOrden.some(l =>
       String((l.attributes || {}).title || '').toLowerCase().indexOf('filmorent rewards') === 0);
     if (yaTiene) {
-      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene un credito Rewards aplicado' });
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene un descuento Rewards aplicado' });
     }
     // regla de Daniel 24-jul-2026: los puntos NO aplican a ventas de equipo —
     // si la orden trae una línea de venta (prefijo "VENTA"), se rechaza
@@ -3340,7 +3341,7 @@ app.post('/rewards/pagar', async (req, res) => {
       return t.indexOf('venta ') === 0 || t.indexOf('venta-') === 0 || t.indexOf('venta:') === 0;
     });
     if (esVenta) {
-      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' incluye venta de equipo: los creditos Rewards aplican solo en rentas' });
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' incluye venta de equipo: los descuentos Rewards aplican solo en rentas' });
     }
 
     // 4) aplicar el descuento en Booqable
@@ -3353,7 +3354,7 @@ app.post('/rewards/pagar', async (req, res) => {
         attributes: {
           owner_id: order.id,
           owner_type: 'orders',
-          title: 'Filmorent Rewards - credito ' + credito + ' (' + folio + ')',
+          title: 'Filmorent Rewards - descuento ' + credito + ' (' + folio + ')',
           quantity: 1,
           price_each_in_cents: -reward.credito_cents
         }
@@ -3412,7 +3413,7 @@ app.post('/rewards/pagar', async (req, res) => {
     });
   } catch (e) {
     console.error('[rewards] pagar error: ' + e.message);
-    return res.status(502).json({ ok: false, error: 'error aplicando el credito, intenta de nuevo' });
+    return res.status(502).json({ ok: false, error: 'error aplicando el descuento, intenta de nuevo' });
   }
 });
 
@@ -3572,7 +3573,7 @@ app.post('/rewards/cupon/aplicar', async (req, res) => {
 
     // 3) la orden destino — mismas reglas que el pago con puntos (§4)
     if (REWARDS_EXCLUDED_ORDER_NUMBERS.has(orderNumber)) {
-      return res.status(409).json({ ok: false, error: 'los creditos Rewards aplican solo en rentas, no en ventas de equipo' });
+      return res.status(409).json({ ok: false, error: 'los descuentos Rewards aplican solo en rentas, no en ventas de equipo' });
     }
     const od = await booqableGet('/orders?filter[number]=' + orderNumber + '&page[size]=2');
     const order = (od.data || [])[0];
@@ -3580,9 +3581,9 @@ app.post('/rewards/cupon/aplicar', async (req, res) => {
     const oa = order.attributes || {};
     if (oa.status === 'canceled') return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' esta cancelada' });
     if (oa.status === 'started' || oa.status === 'stopped') {
-      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + (oa.status === 'started' ? ' ya esta en curso' : ' ya termino') + ': el credito aplica solo en rentas nuevas, antes de facturar' });
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + (oa.status === 'started' ? ' ya esta en curso' : ' ya termino') + ': el descuento aplica solo en rentas nuevas, antes de facturar' });
     }
-    if (oa.payment_status === 'paid') return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el credito se aplica antes del pago' });
+    if (oa.payment_status === 'paid') return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el descuento se aplica antes del pago' });
     const totalWithTax = oa.grand_total_with_tax_in_cents || 0;
     if (totalWithTax < cupon.monto_cents * 2) {
       return res.status(409).json({ ok: false, error: 'la orden debe ser de al menos ' + rewardsFormatMXN(cupon.monto_cents * 2) + ' (2x el cupon de ' + rewardsFormatMXN(cupon.monto_cents) + '); total actual con IVA: ' + rewardsFormatMXN(totalWithTax) });
@@ -3590,12 +3591,12 @@ app.post('/rewards/cupon/aplicar', async (req, res) => {
     const ld = await booqableGet('/lines?filter[order_id]=' + order.id + '&page[size]=100');
     const lineasOrden = (ld.data || []).filter(l => !((l.attributes || {}).archived));
     const yaTiene = lineasOrden.some(l => String((l.attributes || {}).title || '').toLowerCase().indexOf('filmorent rewards') === 0);
-    if (yaTiene) return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene un credito Rewards aplicado' });
+    if (yaTiene) return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene un descuento Rewards aplicado' });
     const esVenta = lineasOrden.some(l => {
       const t = String((l.attributes || {}).title || '').toLowerCase().trim();
       return t.indexOf('venta ') === 0 || t.indexOf('venta-') === 0 || t.indexOf('venta:') === 0;
     });
-    if (esVenta) return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' incluye venta de equipo: los creditos Rewards aplican solo en rentas' });
+    if (esVenta) return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' incluye venta de equipo: los descuentos Rewards aplican solo en rentas' });
     // condición del cupón: si dice 'estudio', la orden debe traer una línea de estudio
     const condicion = String(cupon.condicion || '').toLowerCase();
     if (condicion.indexOf('estudio') !== -1) {
@@ -4064,11 +4065,11 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
       return res.status(409).json({
         ok: false,
         error: 'la orden #' + orderNumber + (oaF.status === 'started' ? ' ya esta en curso' : ' ya termino') +
-          ': el credito aplica solo en rentas nuevas, antes de facturar'
+          ': el descuento aplica solo en rentas nuevas, antes de facturar'
       });
     }
     if (oaF.payment_status === 'paid') {
-      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el credito se aplica antes del pago' });
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya esta pagada: el descuento se aplica antes del pago' });
     }
     const ldF = await booqableGet('/lines?filter[order_id]=' + orderF.id + '&page[size]=100');
     const lineasF = (ldF.data || []).filter(l => !((l.attributes || {}).archived));
@@ -4077,7 +4078,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
       return t.indexOf('venta ') === 0 || t.indexOf('venta-') === 0 || t.indexOf('venta:') === 0;
     });
     if (esVentaF) {
-      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' incluye venta de equipo: los creditos Rewards aplican solo en rentas' });
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' incluye venta de equipo: los descuentos Rewards aplican solo en rentas' });
     }
     // Otro crédito Rewards en la orden (de /pagar u otro folio) = doble descuento.
     // Si la línea menciona ESTE folio es el descuento manual de este mismo canje.
@@ -4086,7 +4087,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
       return t.toLowerCase().indexOf('filmorent rewards') === 0 && t.toUpperCase().indexOf(folio) === -1;
     });
     if (rewardsAjena) {
-      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene otro credito Rewards aplicado' });
+      return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene otro descuento Rewards aplicado' });
     }
     if (creditoCents > 0) {
       // Si el descuento de este folio ya está en la orden, el total ya bajó:
@@ -4099,7 +4100,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
         return res.status(409).json({
           ok: false,
           error: 'la orden debe ser de al menos ' + rewardsFormatMXN(creditoCents * 2) +
-            ' (2x el credito de ' + rewardsFormatMXN(creditoCents) + '); total actual con IVA: ' + rewardsFormatMXN(twt)
+            ' (2x el descuento de ' + rewardsFormatMXN(creditoCents) + '); total actual con IVA: ' + rewardsFormatMXN(twt)
         });
       }
     }
