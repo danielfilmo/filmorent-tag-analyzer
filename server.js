@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.38.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.39.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2064,6 +2064,34 @@ async function rewardsBuildMember(customer) {
     ledger_ok: !!ledger
   };
 }
+
+// ── POST /rewards/beacon ─────────────────────────────────────
+// v8.39 (26-ago-2026, pedido de Daniel): registrar que la página del portal se
+// ABRIÓ, antes del login, para medir el embudo real (aperturas vs logins) y
+// distinguir "no llegan a la página" de "llegan y el login los tumba".
+// Sin datos personales: solo hash(IP+día) para deduplicar 1 fila por visitante
+// por día. Se guarda en el tab Visitas del Ledger con nombre "(beacon <src>)"
+// — los consumidores (reporte CEO, monitor semanal) las cuentan aparte.
+app.post('/rewards/beacon', (req, res) => {
+  res.json({ ok: true });   // responder de inmediato; el registro es fire-and-forget
+  try {
+    const visOrigin = String(req.headers.origin || '');
+    if (!REWARDS_SHEETS_URL || !process.env.REWARDS_HITOS_KEY || !REWARDS_ORIGINS.includes(visOrigin)) return;
+    const src = (String((req.body || {}).src || 'directo').replace(/[^a-z0-9_-]/gi, '').slice(0, 20)) || 'directo';
+    const hoyMty = new Date(Date.now() - 6 * 3600 * 1000).toISOString().slice(0, 10);
+    const nodeCrypto = require('crypto');
+    const iphash = nodeCrypto.createHash('sha1').update(rewardsClientIp(req) + '|' + hoyMty).digest('hex').slice(0, 10);
+    fetch(REWARDS_SHEETS_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tipo: 'visita', k: process.env.REWARDS_HITOS_KEY,
+        clave: 'beacon|' + src + '|' + iphash + '|' + hoyMty,
+        customer_id: '', email: '', nombre: '(beacon ' + src + ')'
+      }),
+      redirect: 'follow'
+    }).catch(() => { /* el beacon nunca es crítico */ });
+  } catch (e) { /* nunca crítico */ }
+});
 
 // ── GET /rewards/member?email=  |  ?customer_id= + token ────
 // v8.28.0: dos puertas de entrada. La de siempre (correo) y la del login por
