@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.42.0', ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.42.1', ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -5296,17 +5296,16 @@ const PDFDocument = require('pdfkit');
 const BOOQ_HOST = 'https://filmorent-sa-de-cv.booqable.com';
 
 async function ordenPorUuid(uuid) {
-  const od = await booqableGet('/orders/' + uuid);
+  const od = await booqableGet('/orders/' + uuid + '?include=customer');
   const a = od.data.attributes;
-  let cliente = null;
-  const cid = ((od.data.relationships || {}).customer || {}).data;
-  if (cid && cid.id) {
-    try { cliente = (await booqableGet('/customers/' + cid.id)).data.attributes; } catch (e) {}
-  }
+  const inc = (od.included || []).find(x => x.type === 'customers');
+  const cliente = inc ? inc.attributes : null;
   const ld = await booqableGet('/lines?filter[order_id]=' + uuid + '&page[size]=60');
+  // Solo lineas de PRIMER NIVEL: los componentes de un kit traen parent_line_id y ya van
+  // incluidos en el precio del kit — listarlos duplica visualmente el total (bug detectado 26-ago).
   const lineas = (ld.data || [])
     .map(l => l.attributes)
-    .filter(l => !l.archived && (l.line_type === 'charge' || (l.price_in_cents || 0) < 0))
+    .filter(l => !l.archived && !l.parent_line_id && (l.line_type === 'charge' || (l.price_in_cents || 0) < 0))
     .sort((x, y) => (x.position || 0) - (y.position || 0));
   return { a, cliente, lineas };
 }
