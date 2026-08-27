@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.42.1', ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.43.0', lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -282,6 +282,37 @@ app.post('/cola_analisis/done', (req, res) => {
   colaAnalisis.forEach(x => { if (ids.has(x.contactId)) x.done = true; });
   colaAnalisisSave();
   res.json({ ok: true, marcados: ids.size });
+});
+
+// ===== LINEA INSTANTANEA (v8.43.0) =====
+// Webhook "Message Received" de respond.io -> cola en memoria que la Mac drena cada ~15s
+// (segunda-linea-daemon.mjs). Elimina la espera de 5 min del cron: el AI contesta al momento.
+// La cola es efimera (se pierde en redeploy): aceptable, el cron de 5 min sigue de red de seguridad.
+let colaMensajes = [];
+app.post('/webhook/mensaje-entrante', (req, res) => {
+  try {
+    const ev = req.body || {};
+    const contactId = (ev.contact && ev.contact.id) || ev.contact_id || null;
+    const msg = ev.message || {};
+    const traffic = msg.traffic || ev.traffic || '';
+    if (contactId && traffic !== 'outgoing') {
+      const texto = (msg.message && (msg.message.text || msg.message.caption)) || '';
+      const nombre = (ev.contact && ((ev.contact.firstName || '') + ' ' + (ev.contact.lastName || '')).trim()) || '';
+      const ya = colaMensajes.find(x => x.contactId === contactId);
+      if (ya) { ya.ts = Date.now(); ya.texto = String(texto).slice(0, 200); }
+      else colaMensajes.push({ contactId, nombre, texto: String(texto).slice(0, 200), ts: Date.now() });
+      if (colaMensajes.length > 200) colaMensajes = colaMensajes.slice(-200);
+      console.log('[mensaje-entrante] contacto ' + contactId + ' en cola (' + colaMensajes.length + ')');
+    }
+    res.json({ ok: true });
+  } catch (e) { console.error('mensaje-entrante: ' + e.message); res.json({ ok: false }); }
+});
+app.get('/webhook/cola-mensajes', (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || req.query.key !== process.env.REWARDS_HITOS_KEY) {
+    return res.status(403).json({ ok: false });
+  }
+  const items = colaMensajes; colaMensajes = [];
+  res.json({ ok: true, items });
 });
 
 app.post('/webhook/conversation-closed', async (req, res) => {
