@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.41.1', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.42.0', ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -5280,6 +5280,151 @@ app.post('/webhook/enviar-info', async (req, res) => {
     return res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
   }
 });
+
+
+// ============================================================
+// ORDENES v8.42.0 — PDF propio + liga de pago SIN CLICKS (26-ago-2026)
+// Elimina los 2 unicos pasos manuales del ciclo de ordenes:
+//  GET  /orden/:uuid/proforma.pdf  -> Orden de Servicio en PDF, generada AQUI
+//       (URL limpia y estable; el uuid de Booqable es el secreto — mismo modelo que /pay/<uuid>)
+//  POST /orden/:uuid/liga          -> crea (o reusa) la liga de pago por el saldo
+//       via POST /api/boomerang/payment_charges (descubierto 26-ago: el path /api/4 da 404
+//       pero boomerang acepta {order_id, mode:"request", amount_in_cents} con el API key)
+// ============================================================
+const PDFDocument = require('pdfkit');
+
+const BOOQ_HOST = 'https://filmorent-sa-de-cv.booqable.com';
+
+async function ordenPorUuid(uuid) {
+  const od = await booqableGet('/orders/' + uuid);
+  const a = od.data.attributes;
+  let cliente = null;
+  const cid = ((od.data.relationships || {}).customer || {}).data;
+  if (cid && cid.id) {
+    try { cliente = (await booqableGet('/customers/' + cid.id)).data.attributes; } catch (e) {}
+  }
+  const ld = await booqableGet('/lines?filter[order_id]=' + uuid + '&page[size]=60');
+  const lineas = (ld.data || [])
+    .map(l => l.attributes)
+    .filter(l => !l.archived && (l.line_type === 'charge' || (l.price_in_cents || 0) < 0))
+    .sort((x, y) => (x.position || 0) - (y.position || 0));
+  return { a, cliente, lineas };
+}
+
+const pdfMXN = c => '$' + ((c || 0) / 100).toLocaleString('es-MX', { minimumFractionDigits: 2 }) + ' MXN';
+const pdfFecha = iso => { if (!iso) return '-'; const d = new Date(iso);
+  return d.toLocaleDateString('es-MX', { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric' }) + ' ' +
+         d.toLocaleTimeString('es-MX', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit', hour12: true }); };
+
+app.get('/orden/:uuid/proforma.pdf', async (req, res) => {
+  try {
+    const uuid = String(req.params.uuid || '');
+    if (!/^[0-9a-f-]{36}$/.test(uuid)) return res.status(400).send('uuid invalido');
+    let orden;
+    try { orden = await ordenPorUuid(uuid); } catch (e) { return res.status(404).send('orden no encontrada'); }
+    const { a, cliente, lineas } = orden;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="orden-' + (a.number || 'servicio') + '.pdf"');
+    const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
+    doc.pipe(res);
+
+    // Encabezado
+    doc.fontSize(20).fillColor('#8B1E1E').font('Helvetica-Bold').text('FILMORENT', 50, 50);
+    doc.fontSize(9).fillColor('#444').font('Helvetica')
+      .text('Filmorent SA de CV', 50, 74)
+      .text('Blvd Rogelio Cantu Gomez #333 L8, Col. Santa Maria', 50, 86)
+      .text('64650 Monterrey, Nuevo Leon, Mexico', 50, 98)
+      .text('info@filmorent.com  ·  WhatsApp: +52 811 582 2788', 50, 110);
+    doc.fontSize(16).fillColor('#111').font('Helvetica-Bold').text('Orden de Servicio', 380, 50, { align: 'right' });
+    doc.fontSize(11).font('Helvetica').fillColor('#111').text('#' + (a.number || 's/n'), 380, 72, { align: 'right' });
+    doc.fontSize(9).fillColor('#444')
+      .text('Recoge:  ' + pdfFecha(a.starts_at), 340, 90, { align: 'right' })
+      .text('Regresa: ' + pdfFecha(a.stops_at), 340, 102, { align: 'right' });
+
+    // Cliente
+    doc.moveTo(50, 130).lineTo(562, 130).strokeColor('#DDD').stroke();
+    doc.fontSize(9).fillColor('#888').text('CLIENTE', 50, 140);
+    doc.fontSize(11).fillColor('#111').font('Helvetica-Bold')
+      .text((cliente && cliente.name) ? String(cliente.name).split('/')[0].trim() : 'Por confirmar', 50, 152);
+    if (cliente && cliente.email) doc.fontSize(9).font('Helvetica').fillColor('#444').text(cliente.email, 50, 168);
+
+    // Tabla
+    let y = 195;
+    doc.fontSize(8).fillColor('#888').font('Helvetica-Bold');
+    doc.text('CANT', 50, y); doc.text('EQUIPO', 85, y); doc.text('PERIODO', 380, y); doc.text('TOTAL', 490, y, { width: 72, align: 'right' });
+    y += 14; doc.moveTo(50, y).lineTo(562, y).strokeColor('#DDD').stroke(); y += 8;
+    doc.font('Helvetica').fontSize(9);
+    for (const l of lineas) {
+      if (y > 690) { doc.addPage(); y = 60; }
+      const esDesc = (l.price_in_cents || 0) < 0;
+      doc.fillColor(esDesc ? '#0A7A38' : '#111');
+      doc.text(String(l.quantity || 1) + 'x', 50, y, { width: 30 });
+      doc.text(String(l.title || '').slice(0, 70), 85, y, { width: 285 });
+      doc.text(String(l.charge_label || '-'), 380, y, { width: 100 });
+      doc.text(pdfMXN(l.price_in_cents), 470, y, { width: 92, align: 'right' });
+      y += Math.max(14, Math.ceil(String(l.title || '').length / 60) * 12) + 4;
+    }
+    y += 6; doc.moveTo(50, y).lineTo(562, y).strokeColor('#DDD').stroke(); y += 10;
+    const total = a.grand_total_with_tax_in_cents || 0;
+    const pagado = a.total_paid_in_cents || 0;
+    doc.fontSize(10).fillColor('#111').font('Helvetica-Bold').text('TOTAL (IVA incluido)', 320, y, { width: 140 });
+    doc.text(pdfMXN(total), 470, y, { width: 92, align: 'right' }); y += 16;
+    if (pagado > 0) {
+      doc.font('Helvetica').fontSize(9).fillColor('#444');
+      doc.text('Pagado', 320, y, { width: 140 }); doc.text(pdfMXN(pagado), 470, y, { width: 92, align: 'right' }); y += 13;
+      doc.font('Helvetica-Bold').fillColor('#8B1E1E');
+      doc.text('Saldo', 320, y, { width: 140 }); doc.text(pdfMXN(total - pagado), 470, y, { width: 92, align: 'right' }); y += 16;
+    }
+    y += 14;
+    doc.fontSize(8).font('Helvetica').fillColor('#666').text(
+      'Precios con IVA incluido. Recoleccion presencial con identificacion oficial fisica. ' +
+      'Recoger sin costo un dia antes (L-V 3:30-7:00 pm). Devolucion sin costo L-V 9:00-11:30 am, sabado 9:30-11:30 am. ' +
+      'Equipo sujeto a disponibilidad hasta confirmar. Cancelacion de ultimo momento genera cargo del 20%.',
+      50, y, { width: 512 });
+    doc.end();
+  } catch (e) {
+    console.error('[orden-pdf] ' + e.message);
+    if (!res.headersSent) res.status(500).send('error generando pdf');
+  }
+});
+
+app.post('/orden/:uuid/liga', async (req, res) => {
+  try {
+    if (DRAFT_ORDER_TOKEN && (req.headers['x-draft-token'] || '') !== DRAFT_ORDER_TOKEN) {
+      return res.status(401).json({ ok: false, error: 'token invalido' });
+    }
+    const uuid = String(req.params.uuid || '');
+    if (!/^[0-9a-f-]{36}$/.test(uuid)) return res.status(400).json({ ok: false, error: 'uuid invalido' });
+    let od; try { od = await booqableGet('/orders/' + uuid); } catch (e) { return res.status(404).json({ ok: false, error: 'orden no encontrada' }); }
+    const a = od.data.attributes;
+    const saldo = (a.grand_total_with_tax_in_cents || 0) - (a.total_paid_in_cents || 0);
+    const monto = parseInt((req.body || {}).amount_in_cents, 10) || saldo;
+    if (monto < 1000) return res.status(422).json({ ok: false, error: 'monto minimo $10 MXN' });
+    // reusar una liga viva del mismo monto (no acumular basura)
+    try {
+      const pd = await booqableGet('/payments?filter[order_id]=' + uuid + '&page[size]=20');
+      const viva = (pd.data || []).find(p => p.attributes.mode === 'request' &&
+        p.attributes.status === 'created' && p.attributes.amount_in_cents === monto);
+      if (viva) return res.json({ ok: true, reused: true, url: 'https://filmorent-sa-de-cv.booqableshop.com/pay/' + viva.id, amount_in_cents: monto, order_number: a.number });
+    } catch (e) {}
+    const r = await fetch(BOOQ_HOST + '/api/boomerang/payment_charges', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + BOOQABLE_API_KEY, 'Content-Type': 'application/vnd.api+json' },
+      body: JSON.stringify({ data: { type: 'payment_charges', attributes: { order_id: uuid, mode: 'request', amount_in_cents: monto } } }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (r.status !== 201 || !body.data) {
+      console.error('[orden-liga] HTTP ' + r.status + ': ' + JSON.stringify(body).slice(0, 200));
+      return res.status(502).json({ ok: false, error: 'no se pudo crear la liga (HTTP ' + r.status + ')' });
+    }
+    return res.json({ ok: true, reused: false, url: 'https://filmorent-sa-de-cv.booqableshop.com/pay/' + body.data.id, amount_in_cents: monto, order_number: a.number });
+  } catch (e) {
+    console.error('[orden-liga] ' + e.message);
+    return res.status(500).json({ ok: false, error: 'error interno' });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log('Filmorent Tag Analyzer v7.2.1 running on port ' + PORT);
