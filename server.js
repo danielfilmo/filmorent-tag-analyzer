@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.43.1', lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.44.0', lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -906,7 +906,20 @@ app.post('/webhook/call-ended', async (req, res) => {
   }
 
   if (!transcript) {
-    console.log('call-ended: No transcript for call ' + meta.callId + ' (llamada perdida, sin grabacion o en curso). Skipping.');
+    // LLAMADA PERDIDA (v8.44.0, opcion A de Daniel 27-ago): sin transcripcion + sin duracion real
+    // en una llamada entrante = nadie contesto. Se mete a la cola de la linea instantanea para que
+    // el AI le escriba por TEXTO al momento ("Vimos tu llamada 📞...").
+    const perdida = meta.direction !== 'outgoing' &&
+      ((meta.duration || 0) <= 3 || /miss|no.?answer|unanswer|cancel|reject/i.test(String(meta.status || '')));
+    if (perdida) {
+      const ya = colaMensajes.find(x => x.contactId === contactId);
+      const texto = '[LLAMADA PERDIDA — el cliente llamo por WhatsApp y nadie contesto]';
+      if (ya) { ya.ts = Date.now(); ya.texto = texto; }
+      else colaMensajes.push({ contactId, nombre: contactName || '', texto, ts: Date.now() });
+      console.log('call-ended: llamada PERDIDA de ' + contactId + ' -> cola linea instantanea');
+    } else {
+      console.log('call-ended: No transcript for call ' + meta.callId + ' (sin grabacion). Skipping.');
+    }
     return;
   }
 
