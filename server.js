@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.41.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.41.1', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4366,7 +4366,7 @@ async function draftFindProduct(query, contexto) {
     const lista = candidatos.slice(0, 40);
     try {
       const resp = await anthropic.messages.create({
-        model: 'claude-sonnet-5',
+        model: 'claude-opus-5',
         max_tokens: 300,
         thinking: { type: 'disabled' },
         messages: [{
@@ -4720,7 +4720,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       // adaptativo se comia el presupuesto y truncaba el JSON. Esta extraccion
       // no necesita pensar, asi que en el 1er intento se apaga. El 2o intento va
       // SIN el parametro: si algun dia el modelo no lo acepta, se auto-repara.
-      const params = { model: 'claude-sonnet-5', messages: [{ role: 'user', content: userContent }] };
+      const params = { model: 'claude-opus-5', messages: [{ role: 'user', content: userContent }] }; // Opus: decision de Daniel 26-ago (copiloto muy capaz)
       if (intento === 1) {
         params.max_tokens = 2000;
         params.thinking = { type: 'disabled' };
