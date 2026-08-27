@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.44.0', lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.44.2', lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -307,6 +307,28 @@ app.post('/webhook/mensaje-entrante', (req, res) => {
     res.json({ ok: true });
   } catch (e) { console.error('mensaje-entrante: ' + e.message); res.json({ ok: false }); }
 });
+// Webhook "New Comment" de respond.io (27-ago): comentarios internos del EQUIPO se atienden
+// AL INSTANTE por la misma linea (feedback de mejoras/quejas al AI, o instrucciones operativas).
+// Se ignoran los comentarios del propio AI (empiezan con el robot) para no ciclar.
+app.post('/webhook/comentario-interno', (req, res) => {
+  try {
+    const ev = req.body || {};
+    const contactId = (ev.contact && ev.contact.id) || ev.contact_id || null;
+    const c = ev.comment || ev.data || {};
+    const texto = String(c.text || c.content || ev.text || '').trim();
+    const autor = (c.user && ((c.user.firstName || '') + ' ' + (c.user.lastName || '')).trim()) || (ev.user && ev.user.firstName) || 'equipo';
+    if (contactId && texto && !texto.startsWith('\u{1F916}')) {
+      const marcado = '[COMENTARIO INTERNO de ' + autor + ']: ' + texto.slice(0, 400);
+      const ya = colaMensajes.find(x => x.contactId === contactId);
+      if (ya) { ya.ts = Date.now(); ya.texto = (ya.texto + ' | ' + marcado).slice(-600); }
+      else colaMensajes.push({ contactId, nombre: (ev.contact && ev.contact.firstName) || '', texto: marcado, ts: Date.now() });
+      if (colaMensajes.length > 200) colaMensajes = colaMensajes.slice(-200);
+      console.log('[comentario-interno] ' + autor + ' en contacto ' + contactId + ' -> cola');
+    }
+    res.json({ ok: true });
+  } catch (e) { console.error('comentario-interno: ' + e.message); res.json({ ok: false }); }
+});
+
 app.get('/webhook/cola-mensajes', (req, res) => {
   if (!process.env.REWARDS_HITOS_KEY || req.query.key !== process.env.REWARDS_HITOS_KEY) {
     return res.status(403).json({ ok: false });
@@ -5359,7 +5381,7 @@ const pdfFecha = iso => { if (!iso) return '-'; const d = new Date(iso);
   return d.toLocaleDateString('es-MX', { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric' }) + ' ' +
          d.toLocaleTimeString('es-MX', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit', hour12: true }); };
 
-app.get('/orden/:uuid/proforma.pdf', async (req, res) => {
+async function generarOrdenPDF(req, res, nombreArchivo) {
   try {
     const uuid = String(req.params.uuid || '');
     if (!/^[0-9a-f-]{36}$/.test(uuid)) return res.status(400).send('uuid invalido');
@@ -5367,8 +5389,9 @@ app.get('/orden/:uuid/proforma.pdf', async (req, res) => {
     try { orden = await ordenPorUuid(uuid); } catch (e) { return res.status(404).send('orden no encontrada'); }
     const { a, cliente, lineas } = orden;
 
+    const archivo = nombreArchivo || ('Orden-' + (a.number || 'servicio') + '-Filmorent.pdf');
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline; filename="orden-' + (a.number || 'servicio') + '.pdf"');
+    res.setHeader('Content-Disposition', 'inline; filename="' + archivo + '"');
     const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
     doc.pipe(res);
 
@@ -5392,10 +5415,11 @@ app.get('/orden/:uuid/proforma.pdf', async (req, res) => {
       .text((cliente && cliente.name) ? String(cliente.name).split('/')[0].trim() : 'Por confirmar', 50, 152);
     if (cliente && cliente.email) doc.fontSize(9).font('Helvetica').fillColor('#444').text(cliente.email, 50, 168);
 
-    // Tabla
+    // Tabla (desglosada, pedido de Daniel 27-ago: tarifa por linea, como los PDFs del equipo)
+    const esLbl = l => String(l || '-').replace(/\bdays\b/, 'dias').replace(/\bday\b/, 'dia');
     let y = 195;
     doc.fontSize(8).fillColor('#888').font('Helvetica-Bold');
-    doc.text('CANT', 50, y); doc.text('EQUIPO', 85, y); doc.text('PERIODO', 380, y); doc.text('TOTAL', 490, y, { width: 72, align: 'right' });
+    doc.text('CANT', 50, y); doc.text('EQUIPO', 85, y); doc.text('TARIFA', 355, y); doc.text('TOTAL', 490, y, { width: 72, align: 'right' });
     y += 14; doc.moveTo(50, y).lineTo(562, y).strokeColor('#DDD').stroke(); y += 8;
     doc.font('Helvetica').fontSize(9);
     for (const l of lineas) {
@@ -5403,31 +5427,39 @@ app.get('/orden/:uuid/proforma.pdf', async (req, res) => {
       const esDesc = (l.price_in_cents || 0) < 0;
       doc.fillColor(esDesc ? '#0A7A38' : '#111');
       doc.text(String(l.quantity || 1) + 'x', 50, y, { width: 30 });
-      doc.text(String(l.title || '').slice(0, 70), 85, y, { width: 285 });
-      doc.text(String(l.charge_label || '-').replace(/\bdays\b/, 'dias').replace(/\bday\b/, 'dia'), 380, y, { width: 100 });
+      doc.text(String(l.title || '').slice(0, 60), 85, y, { width: 262 });
+      doc.text(pdfMXN(l.price_each_in_cents || l.price_in_cents).replace(' MXN', '') + ' x ' + esLbl(l.charge_label), 355, y, { width: 110 });
       doc.text(pdfMXN(l.price_in_cents), 470, y, { width: 92, align: 'right' });
-      y += Math.max(14, Math.ceil(String(l.title || '').length / 60) * 12) + 4;
+      y += Math.max(14, Math.ceil(String(l.title || '').length / 52) * 12) + 4;
     }
     y += 6; doc.moveTo(50, y).lineTo(562, y).strokeColor('#DDD').stroke(); y += 10;
-    const total = a.grand_total_with_tax_in_cents || 0;
-    const pagado = a.total_paid_in_cents || 0;
-    // Descuento por cupon (Rewards/promo): las lineas suman el precio de lista y el grand_total
-    // ya trae el cupon aplicado — sin esta linea el cliente ve numeros que "no cuadran".
+
+    // Desglose de totales (como pro-forma de Booqable): suma -> descuento -> sin IVA -> IVA -> total
+    const totalConIva = a.grand_total_with_tax_in_cents || 0;
+    const sinIva = a.grand_total_in_cents || 0;
+    const iva = a.tax_in_cents != null ? a.tax_in_cents : (totalConIva - sinIva);
+    const descuento = (a.total_discount_in_cents || 0);
     const sumaLineas = lineas.reduce((t, l) => t + (l.price_in_cents || 0), 0);
-    if (sumaLineas - total >= 100) {
-      doc.fontSize(9).font('Helvetica').fillColor('#444');
-      doc.text('Subtotal', 320, y, { width: 140 }); doc.text(pdfMXN(sumaLineas), 470, y, { width: 92, align: 'right' }); y += 13;
-      doc.fillColor('#0A7A38').font('Helvetica-Bold');
-      doc.text('Descuento aplicado', 320, y, { width: 140 }); doc.text('-' + pdfMXN(sumaLineas - total), 470, y, { width: 92, align: 'right' }); y += 15;
+    const fila = (label, val, opts) => {
+      opts = opts || {};
+      doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(opts.big ? 10 : 9).fillColor(opts.color || '#444');
+      doc.text(label, 300, y, { width: 160 }); doc.text(val, 460, y, { width: 102, align: 'right' });
+      y += opts.big ? 16 : 13;
+    };
+    if (descuento >= 100) {
+      fila('Suma equipo (IVA incluido)', pdfMXN(sumaLineas));
+      fila('Descuento aplicado', '-' + pdfMXN(descuento), { color: '#0A7A38', bold: true });
     }
-    doc.fontSize(10).fillColor('#111').font('Helvetica-Bold').text('TOTAL (IVA incluido)', 320, y, { width: 140 });
-    doc.text(pdfMXN(total), 470, y, { width: 92, align: 'right' }); y += 16;
+    fila('Subtotal (sin IVA)', pdfMXN(sinIva));
+    fila('IVA', pdfMXN(iva));
+    fila('TOTAL (IVA incluido)', pdfMXN(totalConIva), { bold: true, big: true, color: '#111' });
+    const pagado = a.total_paid_in_cents || 0;
     if (pagado > 0) {
-      doc.font('Helvetica').fontSize(9).fillColor('#444');
-      doc.text('Pagado', 320, y, { width: 140 }); doc.text(pdfMXN(pagado), 470, y, { width: 92, align: 'right' }); y += 13;
-      doc.font('Helvetica-Bold').fillColor('#8B1E1E');
-      doc.text('Saldo', 320, y, { width: 140 }); doc.text(pdfMXN(total - pagado), 470, y, { width: 92, align: 'right' }); y += 16;
+      fila('Pagado', pdfMXN(pagado));
+      fila('Saldo', pdfMXN(totalConIva - pagado), { bold: true, color: '#8B1E1E' });
     }
+    if ((a.deposit_in_cents || 0) > 0) fila('Deposito en garantia', pdfMXN(a.deposit_in_cents));
+
     y += 14;
     doc.fontSize(8).font('Helvetica').fillColor('#666').text(
       'Precios con IVA incluido. Recoleccion presencial con identificacion oficial fisica. ' +
@@ -5439,6 +5471,14 @@ app.get('/orden/:uuid/proforma.pdf', async (req, res) => {
     console.error('[orden-pdf] ' + e.message);
     if (!res.headersSent) res.status(500).send('error generando pdf');
   }
+}
+// URL con el numero de orden en el NOMBRE del archivo (respond.io/WhatsApp nombran el adjunto
+// por el ultimo segmento de la URL — pedido de Daniel 27-ago). /proforma.pdf queda por compatibilidad.
+app.get('/orden/:uuid/proforma.pdf', (req, res) => generarOrdenPDF(req, res, null));
+app.get('/orden/:uuid/:archivo', (req, res, next) => {
+  const archivo = String(req.params.archivo || '');
+  if (!/^Orden-[\w.()-]+\.pdf$/i.test(archivo)) return next();
+  return generarOrdenPDF(req, res, archivo);
 });
 
 app.post('/orden/:uuid/liga', async (req, res) => {
