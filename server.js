@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.43.0', lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.43.1', lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -5391,13 +5391,22 @@ app.get('/orden/:uuid/proforma.pdf', async (req, res) => {
       doc.fillColor(esDesc ? '#0A7A38' : '#111');
       doc.text(String(l.quantity || 1) + 'x', 50, y, { width: 30 });
       doc.text(String(l.title || '').slice(0, 70), 85, y, { width: 285 });
-      doc.text(String(l.charge_label || '-'), 380, y, { width: 100 });
+      doc.text(String(l.charge_label || '-').replace(/\bdays\b/, 'dias').replace(/\bday\b/, 'dia'), 380, y, { width: 100 });
       doc.text(pdfMXN(l.price_in_cents), 470, y, { width: 92, align: 'right' });
       y += Math.max(14, Math.ceil(String(l.title || '').length / 60) * 12) + 4;
     }
     y += 6; doc.moveTo(50, y).lineTo(562, y).strokeColor('#DDD').stroke(); y += 10;
     const total = a.grand_total_with_tax_in_cents || 0;
     const pagado = a.total_paid_in_cents || 0;
+    // Descuento por cupon (Rewards/promo): las lineas suman el precio de lista y el grand_total
+    // ya trae el cupon aplicado — sin esta linea el cliente ve numeros que "no cuadran".
+    const sumaLineas = lineas.reduce((t, l) => t + (l.price_in_cents || 0), 0);
+    if (sumaLineas - total >= 100) {
+      doc.fontSize(9).font('Helvetica').fillColor('#444');
+      doc.text('Subtotal', 320, y, { width: 140 }); doc.text(pdfMXN(sumaLineas), 470, y, { width: 92, align: 'right' }); y += 13;
+      doc.fillColor('#0A7A38').font('Helvetica-Bold');
+      doc.text('Descuento aplicado', 320, y, { width: 140 }); doc.text('-' + pdfMXN(sumaLineas - total), 470, y, { width: 92, align: 'right' }); y += 15;
+    }
     doc.fontSize(10).fillColor('#111').font('Helvetica-Bold').text('TOTAL (IVA incluido)', 320, y, { width: 140 });
     doc.text(pdfMXN(total), 470, y, { width: 92, align: 'right' }); y += 16;
     if (pagado > 0) {
