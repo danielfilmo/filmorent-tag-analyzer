@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.40.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.41.0', colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4418,6 +4418,10 @@ app.post('/webhook/draft-order', async (req, res) => {
     // todo lo pedido ANTES de eso ya se atendio y no debe volver a convertirse en
     // borrador (asi es como el copiloto revivia rentas viejas ya cotizadas).
     let idxUltimoDoc = -1;
+    // Imagenes que mando el CLIENTE (listas de equipo en foto/captura — caso #10801):
+    // se bajan y se pasan a Claude con vision. Antes solo salia "[image]" en el
+    // transcript y el borrador quedaba vacio.
+    const imagenesCliente = [];
     const filas = msgs.map(function (m, i) {
       const who = m.traffic === 'incoming' ? 'CLIENTE' : 'FILMORENT';
       const msg = m.message || {};
@@ -4434,10 +4438,15 @@ app.post('/webhook/draft-order', async (req, res) => {
       if (!t && msg.type === 'attachment') {
         const att = msg.attachment || {};
         const nombre = String(att.fileName || '').toLowerCase();
+        const urlAtt = att.url || att.fileUrl || '';
         const esDoc = att.type === 'file' || /invoice|cotiza|orden|pro_forma|proforma|\.pdf/.test(nombre);
+        const esImagen = att.type === 'image' || /\.(jpe?g|png|webp|gif)(\?|$)/.test(String(urlAtt).toLowerCase());
         if (who === 'FILMORENT' && esDoc) {
           idxUltimoDoc = i;
           t = '[FILMORENT LE ENVIO UN DOCUMENTO (cotizacion/orden): ' + (att.fileName || 'documento') + ']';
+        } else if (who === 'CLIENTE' && esImagen && urlAtt) {
+          imagenesCliente.push({ idx: i, url: urlAtt });
+          t = '[IMAGEN ' + imagenesCliente.length + ' DEL CLIENTE — va adjunta abajo, LEELA]';
         } else {
           t = '[' + (att.type || 'adjunto') + ']';
         }
@@ -4454,6 +4463,27 @@ app.post('/webhook/draft-order', async (req, res) => {
 
     if (!transcript) {
       return res.status(422).json({ ok: false, error: 'conversacion vacia' });
+    }
+
+    // Bajar las imagenes del cliente (solo las posteriores al ultimo documento enviado —
+    // las de antes ya se atendieron) y prepararlas como bloques de vision para Claude.
+    const imagenesRelevantes = (idxUltimoDoc >= 0
+      ? imagenesCliente.filter(function (im) { return im.idx > idxUltimoDoc; })
+      : imagenesCliente).slice(-8); // tope 8, las mas recientes
+    const bloquesImagen = [];
+    for (const im of imagenesRelevantes) {
+      try {
+        const ir = await fetch(im.url);
+        if (!ir.ok) { console.error('[draft-order] imagen HTTP ' + ir.status); continue; }
+        const ct = String(ir.headers.get('content-type') || '').split(';')[0].trim();
+        if (['image/jpeg', 'image/png', 'image/webp', 'image/gif'].indexOf(ct) === -1) continue;
+        const buf = Buffer.from(await ir.arrayBuffer());
+        if (buf.length > 4500000) { console.error('[draft-order] imagen muy grande, la salto'); continue; }
+        bloquesImagen.push({ type: 'image', source: { type: 'base64', media_type: ct, data: buf.toString('base64') } });
+      } catch (e) { console.error('[draft-order] imagen no bajo: ' + e.message); }
+    }
+    if (imagenesRelevantes.length) {
+      console.log('[draft-order] imagenes del cliente: ' + imagenesRelevantes.length + ' relevantes, ' + bloquesImagen.length + ' bajadas OK');
     }
 
     const nombreContacto = (((contact.firstName || '') + ' ' + (contact.lastName || '')).trim()) || null;
@@ -4672,16 +4702,25 @@ app.post('/webhook/draft-order', async (req, res) => {
     let ext = null;
     let ultimoRaw = '';
     for (let intento = 1; intento <= 2 && !ext; intento++) {
-      const contenido = intento === 1
+      let contenido = intento === 1
         ? extractPrompt
         : extractPrompt + '\n\nIMPORTANTE: tu respuesta anterior no fue JSON valido. ' +
           'Responde SOLO el objeto JSON, empezando con { y terminando con }. Sin texto antes ni despues.';
+      // Con imagenes: van como bloques de vision + instruccion de leerlas.
+      let userContent = contenido;
+      if (bloquesImagen.length) {
+        contenido += '\n\nADJUNTAS VAN ' + bloquesImagen.length + ' IMAGEN(ES) QUE MANDO EL CLIENTE ' +
+          '(listas de equipo, capturas de la tienda, fotos). LEELAS CON CUIDADO: el equipo pedido puede ' +
+          'venir SOLO en las imagenes. Extrae de ahi los equipos y cantidades igual que si vinieran en texto. ' +
+          'Si una imagen no se entiende, anotalo en "notas".';
+        userContent = [{ type: 'text', text: contenido }].concat(bloquesImagen);
+      }
       // CAUSA RAIZ MEDIDA (30-jul, log de Render): el intento fallaba con
       // stop_reason=max_tokens y bloques "thinking,text" — el razonamiento
       // adaptativo se comia el presupuesto y truncaba el JSON. Esta extraccion
       // no necesita pensar, asi que en el 1er intento se apaga. El 2o intento va
       // SIN el parametro: si algun dia el modelo no lo acepta, se auto-repara.
-      const params = { model: 'claude-sonnet-5', messages: [{ role: 'user', content: contenido }] };
+      const params = { model: 'claude-sonnet-5', messages: [{ role: 'user', content: userContent }] };
       if (intento === 1) {
         params.max_tokens = 2000;
         params.thinking = { type: 'disabled' };
@@ -4900,6 +4939,20 @@ app.post('/webhook/draft-order', async (req, res) => {
         const chk = await booqableGet('/orders/' + orderId);
         orderNumber = chk.data.attributes.number;
       } catch (e) { console.error('[draft-order] transicion a draft: ' + e.message); }
+
+      // Nota EN la orden (Booqable): el contexto no puede vivir solo en Respond.io — quien
+      // abra la orden debe entender que tiene y que falto (caso #10801: quedo vacia y sin explicacion).
+      try {
+        const notaL = ['Creada por el copiloto AI desde la conversacion de WhatsApp. NADA se envio al cliente.'];
+        if (agregados.length) notaL.push('Equipo agregado: ' + agregados.join(' | '));
+        if (noEncontrados.length) notaL.push('NO ENCONTRADO en catalogo (agregar a mano): ' + noEncontrados.join(', '));
+        if (fallaronReserva.length) notaL.push('Fallo la reserva (agregar a mano): ' + fallaronReserva.join(', '));
+        if (bloquesImagen.length) notaL.push('El cliente mando ' + bloquesImagen.length + ' imagen(es) con su lista; se leyeron con AI — verificar contra el chat.');
+        if (ext && ext.notas) notaL.push('Notas del chat: ' + String(ext.notas).slice(0, 300));
+        await booqableWrite('POST', '/notes', {
+          data: { type: 'notes', attributes: { body: notaL.join('\n'), owner_id: orderId, owner_type: 'orders' } }
+        });
+      } catch (e) { console.error('[draft-order] nota en orden: ' + e.message); }
 
       resultados.push({
         orderId: orderId, number: orderNumber, agregados: agregados, noEncontrados: noEncontrados,
