@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.44.2', lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.45.1', lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true, feedback: true }));
 
 function extractContactId(body) {
   return (
@@ -281,6 +281,111 @@ app.post('/cola_analisis/done', (req, res) => {
   const ids = new Set(((req.body || {}).contactIds) || []);
   colaAnalisis.forEach(x => { if (ids.has(x.contactId)) x.done = true; });
   colaAnalisisSave();
+  res.json({ ok: true, marcados: ids.size });
+});
+
+// ============================================================
+// ENCUESTA POST-RENTA (v8.45.0, 27-ago-2026, aprobada por Daniel)
+// La Mac manda plantilla WhatsApp (1 al 5) con boton a /feedback?t=TOKEN.
+// El detalle del cliente NUNCA pasa por Respond.io: cae aqui y la Mac lo
+// drena via /feedback_cola (mismo patron que cola_analisis). Disco efimero
+// en deploys: ventana de perdida <= pull de la Mac (25 min), aceptable.
+// TOKEN = base64url(JSON{c,o,n,e}) + '.' + HMAC-SHA256(payload, HITOS_KEY)[:16]
+// ============================================================
+const FEEDBACK_FILE = path.join(__dirname, 'feedback_encuesta.json');
+let feedbackCola = [];
+try { feedbackCola = JSON.parse(fs.readFileSync(FEEDBACK_FILE, 'utf8')); } catch (e) {}
+function feedbackSave() {
+  try { fs.writeFileSync(FEEDBACK_FILE, JSON.stringify(feedbackCola)); } catch (e) {}
+}
+function feedbackFirma(payloadB64) {
+  const nodeCrypto = require('crypto');
+  return nodeCrypto.createHmac('sha256', process.env.REWARDS_HITOS_KEY || '')
+    .update(payloadB64).digest('hex').slice(0, 16);
+}
+function feedbackParseToken(t) {
+  try {
+    const partes = String(t || '').split('.');
+    if (partes.length !== 2 || !process.env.REWARDS_HITOS_KEY) return null;
+    const p = partes[0], sig = partes[1];
+    if (feedbackFirma(p) !== sig) return null;
+    let b64 = p.replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    return JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+  } catch (e) { return null; }
+}
+function feedbackEsc(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+app.get('/feedback', (req, res) => {
+  const datos = feedbackParseToken(req.query.t);
+  if (!datos) return res.status(404).send('Link no valido.');
+  const nombre = feedbackEsc(datos.n || '');
+  const equipo = feedbackEsc(datos.e || 'tu equipo');
+  res.set('Content-Type', 'text/html; charset=utf-8').send(`<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>Filmorent — Tu opinion</title><style>
+body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#111;color:#eee;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}
+.card{background:#1c1c1e;border-radius:16px;padding:28px 24px;max-width:420px;width:calc(100% - 32px);box-shadow:0 8px 30px rgba(0,0,0,.5)}
+h1{font-size:20px;margin:0 0 6px}p{color:#aaa;font-size:14px;margin:0 0 18px}
+.stars{display:flex;gap:8px;justify-content:center;margin:14px 0 20px}
+.stars button{font-size:34px;background:none;border:none;cursor:pointer;filter:grayscale(1);transition:filter .1s,transform .1s;padding:2px}
+.stars button.on{filter:none;transform:scale(1.15)}
+textarea{width:100%;box-sizing:border-box;background:#2a2a2d;color:#eee;border:1px solid #3a3a3d;border-radius:10px;padding:12px;font-size:15px;min-height:110px;resize:vertical}
+button.enviar{width:100%;margin-top:16px;background:#e8b64c;color:#111;border:none;border-radius:10px;padding:14px;font-size:16px;font-weight:700;cursor:pointer}
+button.enviar:disabled{opacity:.5;cursor:default}
+.gracias{text-align:center;font-size:17px;line-height:1.5;display:none}
+</style></head><body><div class="card">
+<div id="form"><h1>Hola${nombre ? ' ' + nombre : ''} 👋</h1>
+<p>Cuentanos como estuvo tu renta de <b>${equipo}</b>. Lo lee directo la direccion — no es un chat.</p>
+<div class="stars" id="stars"></div>
+<textarea id="texto" placeholder="Que estuvo bien, que podemos mejorar, que fallo... (opcional)"></textarea>
+<button class="enviar" id="btn" disabled>Enviar</button></div>
+<div class="gracias" id="gracias">🙏<br><b>Gracias por tu tiempo.</b><br>Tu opinion llega directo a la direccion de Filmorent.</div>
+</div><script>
+var score=0,t=${JSON.stringify(String(req.query.t || ''))};
+var cont=document.getElementById('stars');
+for(var i=1;i<=5;i++){(function(n){var b=document.createElement('button');b.textContent='\\u2B50';
+b.onclick=function(){score=n;var bs=cont.children;for(var j=0;j<5;j++)bs[j].className=j<n?'on':'';document.getElementById('btn').disabled=false;};cont.appendChild(b);})(i);}
+document.getElementById('btn').onclick=function(){this.disabled=true;
+fetch('/feedback/enviar',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({t:t,score:score,texto:document.getElementById('texto').value})})
+.then(function(r){return r.json();}).then(function(){
+document.getElementById('form').style.display='none';
+document.getElementById('gracias').style.display='block';})
+.catch(function(){document.getElementById('btn').disabled=false;alert('No se pudo enviar, intenta de nuevo.');});};
+</script></body></html>`);
+});
+app.post('/feedback/enviar', (req, res) => {
+  const b = req.body || {};
+  const datos = feedbackParseToken(b.t);
+  if (!datos) return res.status(403).json({ ok: false });
+  const score = parseInt(b.score, 10);
+  feedbackCola.push({
+    id: Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+    ts: Date.now(), customer_id: datos.c || '', orden: datos.o || '',
+    cliente: datos.n || '', equipo: datos.e || '',
+    score: (score >= 1 && score <= 5) ? score : null,
+    texto: String(b.texto || '').slice(0, 2000), done: false
+  });
+  if (feedbackCola.length > 500) feedbackCola = feedbackCola.slice(-500);
+  feedbackSave();
+  console.log('Feedback encuesta: ' + (datos.n || '?') + ' score=' + score);
+  res.json({ ok: true });
+});
+app.get('/feedback_cola', (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || req.query.key !== process.env.REWARDS_HITOS_KEY) {
+    return res.status(403).json({ ok: false });
+  }
+  res.json({ ok: true, pendientes: feedbackCola.filter(x => !x.done) });
+});
+app.post('/feedback_cola/done', (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || (req.body || {}).key !== process.env.REWARDS_HITOS_KEY) {
+    return res.status(403).json({ ok: false });
+  }
+  const ids = new Set(((req.body || {}).ids) || []);
+  feedbackCola.forEach(x => { if (ids.has(x.id)) x.done = true; });
+  feedbackSave();
   res.json({ ok: true, marcados: ids.size });
 });
 
