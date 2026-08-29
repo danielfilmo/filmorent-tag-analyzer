@@ -97,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.45.0', voz: true, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.45.1', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -303,7 +303,9 @@ app.post('/webhook/mensaje-entrante', (req, res) => {
       // el AI atienda el pedido en vez de escalarlo. Async: no bloquea la respuesta del webhook.
       const adj = msg.message && msg.message.attachment;
       const esAudio = adj && (adj.type === 'audio' || /^audio\//.test(adj.mimeType || '') || /(ogg|mp3|m4a|wav|opus)$/i.test(adj.ext || ''));
-      if (esAudio && adj.url) {
+      // APAGADO DE EMERGENCIA (29-ago): gasto de $10 en 90 min sin explicacion clara justo tras
+      // conectar esto. Se reactiva cuando se confirme la causa real del gasto. process.env.VOZ_ON=1 reactiva.
+      if (esAudio && adj.url && process.env.VOZ_ON === '1') {
         (async () => {
           try {
             const t = await transcribeAudio(adj.url);
