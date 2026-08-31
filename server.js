@@ -124,7 +124,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.46.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.47.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -386,6 +386,32 @@ app.post('/webhook/mensaje-entrante', (req, res) => {
           /invoice|pro[-_ ]?forma|proforma|contract|orden[-_ ]de[-_ ]servicio/i.test(nombreAdj);
         if (esOrden) {
           const nombreC = (ev.contact && ((ev.contact.firstName || '') + ' ' + (ev.contact.lastName || '')).trim()) || '';
+          // VERIFICACION PROFUNDA (31-ago, Daniel): ordenes con >3 items o >$2,000 se revisan con
+          // Opus, no con Sonnet. Se resuelve la orden desde el charge_id de la liga de pago.
+          // El lookup de Booqable corre async y ACTUALIZA la entrada de la cola; el daemon
+          // espera 90s de debounce, asi que llega a tiempo para elegir modelo.
+          (async function () {
+            try {
+              const mCharge = String(textoOut).match(/\/pay\/([0-9a-f-]{36})/i);
+              if (!mCharge) return;
+              const pay = await booqableGet('/payments/' + mCharge[1]);
+              const oid = pay && pay.data && pay.data.attributes && pay.data.attributes.order_id;
+              if (!oid) return;
+              const ord = await booqableGet('/orders/' + oid);
+              const conIVA = ((ord.data.attributes.grand_total_with_tax_in_cents) || 0) / 100;
+              const lns = await booqableGet('/lines?filter[order_id]=' + oid + '&page[size]=50');
+              const nItems = (lns.data || []).filter(function (l) { return !l.attributes.parent_line_id; }).length;
+              if (nItems > 3 || conIVA > 2000) {
+                const marca = ' [VERIFICACION PROFUNDA: orden #' + ord.data.attributes.number +
+                  ', ' + nItems + ' items, $' + Math.round(conIVA) + ' con IVA]';
+                const e2 = colaMensajes.find(x => x.contactId === contactId);
+                if (e2 && e2.texto.indexOf('VERIFICACION PROFUNDA') === -1) {
+                  e2.texto = (e2.texto.slice(0, 60) + marca + e2.texto.slice(60)).slice(0, 600);
+                  console.log('[verificar-orden] profunda: #' + ord.data.attributes.number + ' (' + nItems + ' items, $' + Math.round(conIVA) + ')');
+                }
+              }
+            } catch (e) { console.error('[verificar-orden] lookup: ' + e.message); }
+          })();
           const marcado = '\u{1F9FE} ORDEN/LIGA ENVIADA AL CLIENTE \u2014 VERIFICA contra la conversacion que la orden ' +
             'traiga TODO lo pedido (equipos, fechas, cantidades). Si falta o sobra algo, comenta YA antes de que pague. ' +
             'Lo enviado: ' + String(textoOut || nombreAdj).slice(0, 180);
