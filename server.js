@@ -124,7 +124,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.47.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.48.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -401,7 +401,9 @@ app.post('/webhook/mensaje-entrante', (req, res) => {
               const conIVA = ((ord.data.attributes.grand_total_with_tax_in_cents) || 0) / 100;
               const lns = await booqableGet('/lines?filter[order_id]=' + oid + '&page[size]=50');
               const nItems = (lns.data || []).filter(function (l) { return !l.attributes.parent_line_id; }).length;
-              if (nItems > 3 || conIVA > 2000) {
+              // 31-ago (Daniel): "dejemos en Opus por tranquilidad lo de las ordenes" — TODA
+              // orden enviada se verifica con Opus, sin umbral (~15M/dia efectivos vs ~6M).
+              {
                 const marca = ' [VERIFICACION PROFUNDA: orden #' + ord.data.attributes.number +
                   ', ' + nItems + ' items, $' + Math.round(conIVA) + ' con IVA]';
                 const e2 = colaMensajes.find(x => x.contactId === contactId);
