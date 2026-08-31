@@ -141,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.50.1', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.51.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -5722,6 +5722,52 @@ app.post('/orden/:uuid/liga', async (req, res) => {
   }
 });
 
+
+// ===== PUENTE PDF DE BOOQABLE (v8.51.0, 31-ago-2026) =========================
+// Booqable NO deja bajar por API el PDF de un documento: el export interno
+// (POST /api/boomerang/operations, operation_data.type "export") se acepta con 201 y luego
+// truena con "Exception"; falla igual disparado desde la sesion del navegador, o sea no es
+// permisos sino que el payload va con otra forma. Ticket #129312355 abierto con soporte.
+// PERO el correo si lo adjunta: POST /api/4/emails con document_ids "renders the document
+// as a PDF and includes it as an attachment" (probado 31-ago). De ahi el puente:
+//   Mac: dispara el correo -> lo baja por IMAP -> sube los bytes aqui
+//   server: los publica en una URL temporal -> respond.io la adjunta por WhatsApp
+// Resultado: el cliente recibe EL MISMO PDF que manda el equipo (logo, foto del equipo,
+// terminos y datos fiscales), no el de texto plano que genera el AI.
+const pdfsPublicados = new Map(); // id -> { buf, nombre, exp }
+const PDF_TTL_MS = 6 * 60 * 60 * 1000; // respond.io lo descarga en segundos; no hay que guardarlo
+function limpiarPdfsPublicados() {
+  const ahora = Date.now();
+  for (const [k, v] of pdfsPublicados) if (v.exp < ahora) pdfsPublicados.delete(k);
+}
+app.post('/pdf/publicar',
+  express.raw({ type: ['application/pdf', 'application/octet-stream'], limit: '12mb' }),
+  (req, res) => {
+    if (!process.env.REWARDS_HITOS_KEY || (req.headers['x-key'] || '') !== process.env.REWARDS_HITOS_KEY) {
+      return res.status(403).json({ ok: false });
+    }
+    const buf = req.body;
+    if (!Buffer.isBuffer(buf) || buf.length < 100 || buf.slice(0, 5).toString() !== '%PDF-') {
+      return res.status(422).json({ ok: false, error: 'no es un PDF' });
+    }
+    limpiarPdfsPublicados();
+    // El nombre importa: WhatsApp nombra el adjunto por el ultimo segmento de la URL.
+    let nombre = String(req.headers['x-nombre'] || 'Orden.pdf');
+    if (!/^[\w.()-]{1,60}\.pdf$/i.test(nombre)) nombre = 'Orden.pdf';
+    const id = require('crypto').randomBytes(12).toString('hex');
+    pdfsPublicados.set(id, { buf, nombre, exp: Date.now() + PDF_TTL_MS });
+    console.log('[pdf-puente] publicado ' + nombre + ' (' + buf.length + ' bytes) id=' + id.slice(0, 8));
+    return res.json({ ok: true, url: 'https://filmorent-tag-analyzer.onrender.com/pdf/' + id + '/' + nombre,
+                      bytes: buf.length, expira_horas: 6 });
+  });
+app.get('/pdf/:id/:nombre', (req, res) => {
+  limpiarPdfsPublicados();
+  const e = pdfsPublicados.get(String(req.params.id));
+  if (!e) return res.status(404).send('no disponible');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="' + e.nombre + '"');
+  return res.send(e.buf);
+});
 
 app.listen(PORT, () => {
   console.log('Filmorent Tag Analyzer v7.2.1 running on port ' + PORT);
