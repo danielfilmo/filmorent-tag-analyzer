@@ -21,50 +21,6 @@ const BACKFILL_TOKEN = process.env.BACKFILL_TOKEN; // v7.4: habilita GET /backfi
 const PORT = process.env.PORT || 3000;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
-
-// ---- CANDADO DE MODO SECO (31-ago-2026) ----------------------------------
-// Un "--dry" que solo PIDE en el prompt "no envies nada" NO es un candado: hoy una corrida
-// de prueba le mando un WhatsApp real a un cliente (Catarino 517814442, 16:06). Mismo patron
-// que ya nos mordio con el dedup de ordenes: pedirle al modelo que no haga algo != impedirselo.
-// Ahora la Mac declara el modo seco AQUI y el server RECHAZA todo envio a clientes mientras dure.
-let modoSeco = { hasta: 0, motivo: '' };
-function enModoSeco() { return Date.now() < modoSeco.hasta; }
-app.post('/modo-seco', (req, res) => {
-  if (!process.env.REWARDS_HITOS_KEY || (req.body || {}).key !== process.env.REWARDS_HITOS_KEY) return res.status(403).json({ ok: false });
-  const min = Math.min(parseInt((req.body || {}).minutos, 10) || 15, 120);
-  const on = (req.body || {}).on !== false;
-  modoSeco = on ? { hasta: Date.now() + min * 60000, motivo: String((req.body || {}).motivo || 'prueba') } : { hasta: 0, motivo: '' };
-  console.log('[modo-seco] ' + (on ? 'ACTIVADO ' + min + ' min (' + modoSeco.motivo + ')' : 'apagado'));
-  res.json({ ok: true, seco: enModoSeco(), hasta: modoSeco.hasta });
-});
-app.get('/modo-seco', (req, res) => res.json({ seco: enModoSeco(), hasta: modoSeco.hasta, motivo: modoSeco.motivo }));
-
-// ---- Contador de gasto API (31-ago-2026, Daniel: "50 dlls al mes no me asusta, cuidar que
-// no pase de eso"). Se acumula por mes en memoria + /tmp (best effort; el guard de la Mac lo
-// lee de /health y avisa a $40 / $50). Precios USD por MTok: sonnet in 3/out 15, opus in 15/out 75,
-// haiku in 1/out 5 (aprox conservadora; cache write cuenta como in).
-const API_PRECIOS = { sonnet: [3, 15], opus: [15, 75], haiku: [1, 5] };
-let apiMes = { mes: new Date().toISOString().slice(0, 7), usd: 0 };
-try { const j = JSON.parse(require('fs').readFileSync('/tmp/api_mes.json', 'utf8')); if (j.mes === apiMes.mes) apiMes = j; } catch (e) {}
-function apiTrack(model, usage) {
-  try {
-    const mesAhora = new Date().toISOString().slice(0, 7);
-    if (apiMes.mes !== mesAhora) apiMes = { mes: mesAhora, usd: 0 };
-    const fam = /opus/i.test(model || '') ? 'opus' : (/haiku/i.test(model || '') ? 'haiku' : 'sonnet');
-    const p = API_PRECIOS[fam];
-    const inp = (usage && ((usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0) * 0.1)) || 0;
-    const out = (usage && usage.output_tokens) || 0;
-    apiMes.usd += (inp * p[0] + out * p[1]) / 1e6;
-    require('fs').writeFile('/tmp/api_mes.json', JSON.stringify(apiMes), function () {});
-  } catch (e) {}
-}
-const _anthCreate = anthropic.messages.create.bind(anthropic.messages);
-anthropic.messages.create = async function (params) {
-  const r = await _anthCreate(params);
-  apiTrack(params && params.model, r && r.usage);
-  return r;
-};
-function apiPasado(limite) { return apiMes.usd >= limite; }
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
 // Extrae de forma robusta el texto de una respuesta de Claude. OJO: claude-sonnet-5 puede
@@ -141,7 +97,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.49.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.46.0', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -333,15 +289,6 @@ app.post('/cola_analisis/done', (req, res) => {
 // (segunda-linea-daemon.mjs). Elimina la espera de 5 min del cron: el AI contesta al momento.
 // La cola es efimera (se pierde en redeploy): aceptable, el cron de 5 min sigue de red de seguridad.
 let colaMensajes = [];
-// Proxy de envio a clientes usado por la Mac: aqui vive el candado del modo seco.
-app.post('/enviar-cliente', async (req, res) => {
-  if (!process.env.REWARDS_HITOS_KEY || (req.body || {}).key !== process.env.REWARDS_HITOS_KEY) return res.status(403).json({ ok: false });
-  if (enModoSeco()) {
-    console.log('[modo-seco] BLOQUEADO envio a ' + (req.body || {}).contactId);
-    return res.status(423).json({ ok: false, bloqueado: 'modo-seco', motivo: modoSeco.motivo });
-  }
-  return res.json({ ok: true, permitido: true });
-});
 app.post('/webhook/mensaje-entrante', (req, res) => {
   try {
     const ev = req.body || {};
@@ -375,80 +322,6 @@ app.post('/webhook/mensaje-entrante', (req, res) => {
       else colaMensajes.push({ contactId, nombre, texto: String(texto).slice(0, 200), ts: Date.now() });
       if (colaMensajes.length > 200) colaMensajes = colaMensajes.slice(-200);
       console.log('[mensaje-entrante] contacto ' + contactId + ' en cola (' + colaMensajes.length + ')');
-
-      // ---- AUTO-BORRADOR (31-ago, aprobado por Daniel): si el cliente trae EQUIPO + FECHAS
-      // concretas, se dispara el copiloto sin esperar el Shortcut. Heuristica barata en codigo;
-      // la extraccion con IA decide el detalle. Cooldown 12h por contacto (el draft-order ademas
-      // trae su propio dedup contra ordenes existentes).
-      try {
-        const t = String(texto || '').toLowerCase();
-        const tieneEquipo = /(fx3|fx30|fx6|fx9|a7|amaran|aputure|astera|skypanel|litemons|elinchrom|c[- ]?stand|tripie|tr\u00edpode|estudio|pocket|grand|dron|drone|lente|c\u00e1mara|camara|gimbal|ronin|monitor|teleprompter|micr\u00f3fono|microfono|hollyland|luz|luces|flash|kit)/.test(t);
-        const tieneFecha = /(ma\u00f1ana|manana|hoy|pasado ma\u00f1ana|lunes|martes|mi\u00e9rcoles|miercoles|jueves|viernes|s\u00e1bado|sabado|domingo|\d{1,2}\s*(de\s*)?(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)|\d{1,2}\/\d{1,2})/.test(t);
-        if (tieneEquipo && tieneFecha) {
-          global.__autoDraftCooldown = global.__autoDraftCooldown || {};
-          const previo = global.__autoDraftCooldown[contactId] || 0;
-          if (Date.now() - previo > 12 * 3600 * 1000) {
-            global.__autoDraftCooldown[contactId] = Date.now();
-            setTimeout(function () {
-              fetch('http://127.0.0.1:' + (process.env.PORT || 10000) + '/webhook/draft-order', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contactId: contactId, origen: 'auto' })
-              }).catch(function (e) { console.error('[auto-draft] ' + e.message); });
-            }, 90 * 1000); // 90s: dejar que el cliente termine su rafaga de mensajes
-            console.log('[auto-draft] gatillo equipo+fechas para contacto ' + contactId + ' (en 90s)');
-          }
-        }
-      } catch (e) { console.error('[auto-draft gatillo] ' + e.message); }
-    } else if (contactId && traffic === 'outgoing') {
-      // ---- VERIFICACION DE ORDEN ENVIADA (31-ago, aprobado por Daniel tras el caso Rocca
-      // #10851: el equipo mando la orden sin la Amaran 150C y lo noto el CLIENTE): cuando sale
-      // una liga de pago o un PDF de orden/contrato, el AI compara conversacion vs orden y
-      // avisa por comentario interno ANTES de que el cliente pague.
-      try {
-        const textoOut = (msg.message && (msg.message.text || msg.message.caption)) || '';
-        const adjOut = msg.message && msg.message.attachment;
-        const nombreAdj = String((adjOut && (adjOut.fileName || adjOut.name || adjOut.url)) || '');
-        const esOrden = /booqableshop\.com\/pay\//i.test(textoOut) ||
-          /invoice|pro[-_ ]?forma|proforma|contract|orden[-_ ]de[-_ ]servicio/i.test(nombreAdj);
-        if (esOrden) {
-          const nombreC = (ev.contact && ((ev.contact.firstName || '') + ' ' + (ev.contact.lastName || '')).trim()) || '';
-          // VERIFICACION PROFUNDA (31-ago, Daniel): ordenes con >3 items o >$2,000 se revisan con
-          // Opus, no con Sonnet. Se resuelve la orden desde el charge_id de la liga de pago.
-          // El lookup de Booqable corre async y ACTUALIZA la entrada de la cola; el daemon
-          // espera 90s de debounce, asi que llega a tiempo para elegir modelo.
-          (async function () {
-            try {
-              const mCharge = String(textoOut).match(/\/pay\/([0-9a-f-]{36})/i);
-              if (!mCharge) return;
-              const pay = await booqableGet('/payments/' + mCharge[1]);
-              const oid = pay && pay.data && pay.data.attributes && pay.data.attributes.order_id;
-              if (!oid) return;
-              const ord = await booqableGet('/orders/' + oid);
-              const conIVA = ((ord.data.attributes.grand_total_with_tax_in_cents) || 0) / 100;
-              const lns = await booqableGet('/lines?filter[order_id]=' + oid + '&page[size]=50');
-              const nItems = (lns.data || []).filter(function (l) { return !l.attributes.parent_line_id; }).length;
-              // 31-ago (Daniel): "dejemos en Opus por tranquilidad lo de las ordenes" — TODA
-              // orden enviada se verifica con Opus, sin umbral (~15M/dia efectivos vs ~6M).
-              {
-                const marca = ' [VERIFICACION PROFUNDA: orden #' + ord.data.attributes.number +
-                  ', ' + nItems + ' items, $' + Math.round(conIVA) + ' con IVA]';
-                const e2 = colaMensajes.find(x => x.contactId === contactId);
-                if (e2 && e2.texto.indexOf('VERIFICACION PROFUNDA') === -1) {
-                  e2.texto = (e2.texto.slice(0, 60) + marca + e2.texto.slice(60)).slice(0, 600);
-                  console.log('[verificar-orden] profunda: #' + ord.data.attributes.number + ' (' + nItems + ' items, $' + Math.round(conIVA) + ')');
-                }
-              }
-            } catch (e) { console.error('[verificar-orden] lookup: ' + e.message); }
-          })();
-          const marcado = '\u{1F9FE} ORDEN/LIGA ENVIADA AL CLIENTE \u2014 VERIFICA contra la conversacion que la orden ' +
-            'traiga TODO lo pedido (equipos, fechas, cantidades). Si falta o sobra algo, comenta YA antes de que pague. ' +
-            'Lo enviado: ' + String(textoOut || nombreAdj).slice(0, 180);
-          const ya2 = colaMensajes.find(x => x.contactId === contactId);
-          if (ya2) { ya2.ts = Date.now(); ya2.texto = marcado.slice(0, 600); }
-          else colaMensajes.push({ contactId, nombre: nombreC, texto: marcado.slice(0, 600), ts: Date.now() });
-          console.log('[verificar-orden] saliente con orden/liga para contacto ' + contactId + ' -> cola');
-        }
-      } catch (e) { console.error('[verificar-orden] ' + e.message); }
     }
     res.json({ ok: true });
   } catch (e) { console.error('mensaje-entrante: ' + e.message); res.json({ ok: false }); }
@@ -967,7 +840,6 @@ app.post('/webhook/conversation-opened', async (req, res) => {
       console.log('Not enough text content to summarize');
       return;
     }
-    if (apiPasado(50)) { console.log('[api-tope] mes en $' + apiMes.usd.toFixed(2) + ' — resumen omitido'); return; }
 
     // Generate summary with Claude
     const summaryPrompt = `Eres asistente de Filmorent (renta de equipo de cine/foto en Monterrey).
@@ -4465,6 +4337,15 @@ async function draftFindProduct(query, contexto) {
     // ("amaran 300" -> "Amaran 300C RGB"). Solo para numeros solos: "fx3"
     // NO debe matchear "FX30" porque son camaras distintas.
     if (/^\d+$/.test(w) && new RegExp('(^|[^a-z0-9])' + esc + '[a-z]($|[^a-z0-9])').test(texto)) return true;
+    // PLURAL/SINGULAR (bug real 31-ago, Grupo Konstrukce): el cliente pidio
+    // "4 intercomunicadores" y el matcher eligio "Kit 6 IntercomunicadorES SE"
+    // porque "Kit 4 Intercomunicador C1" (singular) no matcheaba la palabra en
+    // plural. Se compara tambien la raiz sin sufijo es/s en AMBOS sentidos.
+    const raiz = w.replace(/(es|s)$/, '');
+    if (raiz.length >= 6) {
+      const escR = raiz.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (new RegExp('(^|[^a-z0-9])' + escR + '(es|s)?($|[^a-z0-9])').test(texto)) return true;
+    }
     return w.length >= 6 && texto.replace(/\s+/g, '').indexOf(w) !== -1;
   };
   const genericas = ['luz', 'luces', 'lampara', 'camara', 'lente', 'equipo', 'kit', 'de', 'para', 'con',
@@ -5021,18 +4902,6 @@ app.post('/webhook/draft-order', async (req, res) => {
     // 5) Una ORDEN POR SOLICITUD (fechas distintas = ordenes distintas).
     const patchAttrsBase = { tag_list: ['borrador-ai', tagConversacion] };
     if (customerId) patchAttrsBase.customer_id = customerId;
-    // Clase de AUTO-ENVIO (31-ago, specs de Daniel — MANUAL_REGLAS \u00a714). El vigilante de la
-    // Mac lee estos tags para decidir si/cuando enviar solo. 'ae:no' = siempre humano.
-    try {
-      const todoTxt = JSON.stringify(solicitudes).toLowerCase();
-      const conPersonal = /(gaffer|staff|encargado|operador|crew|asistente de produccion)/.test(todoTxt);
-      const conEstudio = /(estudio|filmo ?grand|filmo ?pocket|unidad ?movil|unidad ?m\u00f3vil)/.test(todoTxt);
-      const esPocket = /(pocket)/.test(todoTxt);
-      if (conPersonal) patchAttrsBase.tag_list.push('ae:no-personal');
-      else if (!customerId) patchAttrsBase.tag_list.push('ae:no-cliente-nuevo');
-      else if (conEstudio) patchAttrsBase.tag_list.push(esPocket ? 'ae:estudio-pocket' : 'ae:estudio');
-      else patchAttrsBase.tag_list.push('ae:equipo');
-    } catch (e) { patchAttrsBase.tag_list.push('ae:no-error'); }
     const resultados = [];
     let patchFallo = false;
     console.log('[draft-order] ordenes vigentes detectadas: ' + ordenesVigentes.length +
