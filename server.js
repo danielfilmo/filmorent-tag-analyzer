@@ -141,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.50.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.50.1', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4486,6 +4486,17 @@ async function draftFindProduct(query, contexto) {
     // ("amaran 300" -> "Amaran 300C RGB"). Solo para numeros solos: "fx3"
     // NO debe matchear "FX30" porque son camaras distintas.
     if (/^\d+$/.test(w) && new RegExp('(^|[^a-z0-9])' + esc + '[a-z]($|[^a-z0-9])').test(texto)) return true;
+    // PLURAL/SINGULAR (bug real 31-ago, Grupo Konstrukce): el cliente pidio
+    // "4 intercomunicadores" y el matcher eligio "Kit 6 IntercomunicadorES SE"
+    // porque "Kit 4 Intercomunicador C1" (singular) no matcheaba la palabra en
+    // plural. Se compara tambien la raiz sin sufijo es/s en AMBOS sentidos.
+    // (Hunk portado de b10ca41 — otra sesion lo comiteo sobre base vieja y el
+    // merge de 2 sesiones lo habia perdido; reintegrado en v8.50.1.)
+    const raiz = w.replace(/(es|s)$/, '');
+    if (raiz.length >= 6) {
+      const escR = raiz.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (new RegExp('(^|[^a-z0-9])' + escR + '(es|s)?($|[^a-z0-9])').test(texto)) return true;
+    }
     return w.length >= 6 && texto.replace(/\s+/g, '').indexOf(w) !== -1;
   };
   const genericas = ['luz', 'luces', 'lampara', 'camara', 'lente', 'equipo', 'kit', 'de', 'para', 'con',
