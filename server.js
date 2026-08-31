@@ -22,6 +22,23 @@ const PORT = process.env.PORT || 3000;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
+// ---- CANDADO DE MODO SECO (31-ago-2026) ----------------------------------
+// Un "--dry" que solo PIDE en el prompt "no envies nada" NO es un candado: hoy una corrida
+// de prueba le mando un WhatsApp real a un cliente (Catarino 517814442, 16:06). Mismo patron
+// que ya nos mordio con el dedup de ordenes: pedirle al modelo que no haga algo != impedirselo.
+// Ahora la Mac declara el modo seco AQUI y el server RECHAZA todo envio a clientes mientras dure.
+let modoSeco = { hasta: 0, motivo: '' };
+function enModoSeco() { return Date.now() < modoSeco.hasta; }
+app.post('/modo-seco', (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || (req.body || {}).key !== process.env.REWARDS_HITOS_KEY) return res.status(403).json({ ok: false });
+  const min = Math.min(parseInt((req.body || {}).minutos, 10) || 15, 120);
+  const on = (req.body || {}).on !== false;
+  modoSeco = on ? { hasta: Date.now() + min * 60000, motivo: String((req.body || {}).motivo || 'prueba') } : { hasta: 0, motivo: '' };
+  console.log('[modo-seco] ' + (on ? 'ACTIVADO ' + min + ' min (' + modoSeco.motivo + ')' : 'apagado'));
+  res.json({ ok: true, seco: enModoSeco(), hasta: modoSeco.hasta });
+});
+app.get('/modo-seco', (req, res) => res.json({ seco: enModoSeco(), hasta: modoSeco.hasta, motivo: modoSeco.motivo }));
+
 // ---- Contador de gasto API (31-ago-2026, Daniel: "50 dlls al mes no me asusta, cuidar que
 // no pase de eso"). Se acumula por mes en memoria + /tmp (best effort; el guard de la Mac lo
 // lee de /health y avisa a $40 / $50). Precios USD por MTok: sonnet in 3/out 15, opus in 15/out 75,
@@ -124,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.48.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.49.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -316,6 +333,15 @@ app.post('/cola_analisis/done', (req, res) => {
 // (segunda-linea-daemon.mjs). Elimina la espera de 5 min del cron: el AI contesta al momento.
 // La cola es efimera (se pierde en redeploy): aceptable, el cron de 5 min sigue de red de seguridad.
 let colaMensajes = [];
+// Proxy de envio a clientes usado por la Mac: aqui vive el candado del modo seco.
+app.post('/enviar-cliente', async (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || (req.body || {}).key !== process.env.REWARDS_HITOS_KEY) return res.status(403).json({ ok: false });
+  if (enModoSeco()) {
+    console.log('[modo-seco] BLOQUEADO envio a ' + (req.body || {}).contactId);
+    return res.status(423).json({ ok: false, bloqueado: 'modo-seco', motivo: modoSeco.motivo });
+  }
+  return res.json({ ok: true, permitido: true });
+});
 app.post('/webhook/mensaje-entrante', (req, res) => {
   try {
     const ev = req.body || {};
