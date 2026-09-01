@@ -141,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.51.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.52.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -5268,6 +5268,11 @@ app.post('/webhook/draft-order', async (req, res) => {
     const preguntas = [];
     const cabeza = [];
     const detalle = [];
+    // 1-sep-2026, Daniel: "borradores muy largos que el equipo no va a leer". `falta` junta SOLO
+    // lo accionable; el detalle (equipo, fechas, precios) ya vive en la orden de Booqable, que va
+    // enlazada en la nota. Los criticos (🔴) van primero para que nunca los corte el tope.
+    const falta = [];
+    const faltaCrit = [];
     const previo = draftRecientes[contactId];
     const ahora = Date.now();
     cabeza.push(resultados.length === 1
@@ -5282,14 +5287,17 @@ app.post('/webhook/draft-order', async (req, res) => {
 
     let lineaCliente;
     if (customerName && !patchFallo) {
+      falta.push(clienteAprendido ? null : 'confirmar que va a nombre de ' + customerName);
       lineaCliente = 'Cliente: ' + customerName +
         (clienteAprendido
           ? ' (el mismo que ustedes asignaron en una orden anterior de este chat).'
           : ' (' + (candidatos[0] ? candidatos[0].ordenes : '?') + ' rentas previas). Confirma que va a ESTE cliente antes de enviar.');
     } else if (customerName && patchFallo) {
+      faltaCrit.push('asignar cliente A MANO: "' + customerName + '" (fallo tecnico) y ponerle tag borrador-ai');
       lineaCliente = '⚠️ Cliente: NO SE PUDO ASIGNAR por un error tecnico. Deberia ser "' +
         customerName + '" — asignalo a mano (y ponle el tag borrador-ai).';
     } else if (candidatos.length >= 1) {
+      falta.push('asignar el cliente en Booqable (¿' + candidatos[0].name + '?)');
       // Con link directo a cada candidato: asignarlo es un clic, no una busqueda.
       const linkCliente = function (c) {
         return '  \u2022 ' + c.name + ' (' + c.ordenes + ' rentas, ultima ' + (c.ultima || 's/f') + ')' +
@@ -5307,6 +5315,7 @@ app.post('/webhook/draft-order', async (req, res) => {
         preguntas.push('¿La orden va a nombre de ' + candidatos[0].name + '?');
       }
     } else {
+      falta.push('dar de alta al cliente en Booqable');
       lineaCliente = 'Cliente: SIN ASIGNAR, no lo encontre en Booqable' +
         (nombreContacto ? ' (en WhatsApp se llama "' + nombreContacto + '")' : '') + '. Crealo o buscalo tu.';
       preguntas.push('¿A nombre de quien facturamos la orden?');
@@ -5320,6 +5329,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       if (r.agregados.length) detalle.push('  Equipo: ' + r.agregados.join(' | '));
       if (r.parcialmenteRepetida && r.parcialmenteRepetida.length) {
         detalle.push('  ⚠️ Repetido: ' + r.parcialmenteRepetida.join('; '));
+        faltaCrit.push('YA estaba apartado ' + String(r.parcialmenteRepetida[0]).split(' ya esta')[0] + ' — revisa si es orden nueva');
         preguntas.push('Ya tienes apartado ' + r.parcialmenteRepetida[0].split(' ya esta')[0] +
           ' para esas fechas. ¿Es una orden NUEVA, es la misma, o le movemos a la que ya tienes?');
       }
@@ -5327,18 +5337,21 @@ app.post('/webhook/draft-order', async (req, res) => {
         r.ambiguos.forEach(function (a) {
           detalle.push('  ⚠️ "' + a.pedido + '" es muy general, hay varios: ' + a.opciones.join(' / ') +
             '. NO elegi ninguno, agregalo tu.');
+          faltaCrit.push('elegir cual "' + a.pedido + '" (hay ' + a.opciones.length + ' opciones)');
           preguntas.push('Sobre el ' + a.pedido + ': manejamos varias opciones (' +
             a.opciones.slice(0, 3).join(', ') + '). ¿Cual necesitas o para que lo vas a usar?');
         });
       }
-      if (r.noEncontrados.length) detalle.push('  ⚠️ NO encontre en catalogo: ' + r.noEncontrados.join(', '));
-      if (r.fallaronReserva.length) detalle.push('  ⚠️ Encontrados pero NO agregados: ' + r.fallaronReserva.join(', '));
-      if (r.omitidos > 0) detalle.push('  ⚠️ Pidio ' + r.totalPedido + ' equipos; solo procese 12.');
+      if (r.noEncontrados.length) { detalle.push('  ⚠️ NO encontre en catalogo: ' + r.noEncontrados.join(', ')); faltaCrit.push('NO esta en catalogo: ' + r.noEncontrados.join(', ')); }
+      if (r.fallaronReserva.length) { detalle.push('  ⚠️ Encontrados pero NO agregados: ' + r.fallaronReserva.join(', ')); faltaCrit.push('NO se pudo agregar: ' + r.fallaronReserva.join(', ')); }
+      if (r.omitidos > 0) { detalle.push('  ⚠️ Pidio ' + r.totalPedido + ' equipos; solo procese 12.'); faltaCrit.push('pidio ' + r.totalPedido + ' equipos, solo procese 12'); }
       if (r.horarioEstudioAsumido) {
         detalle.push('  ⚠️ ESTUDIO sin horario: asumi 4 horas (9:00-13:00). El precio cambia mucho segun las horas.');
+        faltaCrit.push('estudio SIN horario: asumi 4 h, el precio cambia mucho');
         preguntas.push('¿De que hora a que hora ocupas el estudio el ' + r.fi + '? (manejamos bloques de 2, 4, 8 o 12 horas)');
       } else if (r.sinHora) {
         detalle.push('  ⚠️ Sin hora de recoleccion (se asumio 9:00).');
+        falta.push('confirmar hora de recoleccion (asumi 9:00)');
         preguntas.push('¿A que hora pasas por el equipo el ' + r.fi + '? ¿Y que dia lo regresas?');
       }
       if (r.agregados.some(function (a) { return /estudio/i.test(a); })) {
@@ -5349,11 +5362,13 @@ app.post('/webhook/draft-order', async (req, res) => {
         // asi que se marca para que un humano elija la tarifa correcta.
         detalle.push('  \u26a0\ufe0f PRECIO DEL ESTUDIO MAL: Booqable puso la tarifa "Montaje" (la mas barata). ' +
           'Cambia la tarifa en la linea a "Estudio N Horas", "Modulo extra" o "All access" segun lo que ocupe.');
+        faltaCrit.push('CORREGIR tarifa del estudio en Booqable (puso "Montaje", la mas barata)');
       }
       if (r.domingo) {
         // NO decirle al cliente que cerramos: si se abre en domingo, con cargo de
         // encargado (dato de Daniel, 30-jul; pendiente confirmar monto con el equipo).
         detalle.push('  \u26a0\ufe0f Cae en DOMINGO: confirma disponibilidad y si aplica cargo de encargado.');
+        faltaCrit.push('cae en DOMINGO: confirma disponibilidad y cargo de encargado');
       }
       if (r.orderId) detalle.push('  https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
     }
@@ -5365,24 +5380,49 @@ app.post('/webhook/draft-order', async (req, res) => {
       preguntas.push('¿Cuantas personas van a estar? ¿Necesitas sala adicional o solo el estudio?');
     }
 
-    const lineas = cabeza.slice();
     // Sin repetidas: con varias ordenes la misma pregunta salia 2-3 veces
     // (ej. "el domingo estamos cerrados" por cada orden de ese dia).
     const preguntasUnicas = preguntas.filter(function (q, i) { return preguntas.indexOf(q) === i; });
-    if (preguntasUnicas.length) {
-      lineas.push('');
-      lineas.push('❓ FALTA PREGUNTARLE AL CLIENTE (copia y pega):');
-      preguntasUnicas.slice(0, 5).forEach(function (q) { lineas.push('  ' + q); });
+
+    // ---- NOTA CORTA (1-sep-2026, formato aprobado por Daniel) ----
+    // Antes esta nota repetia adentro TODO lo que ya esta en la orden (equipo, fechas, precios) y
+    // encima traia el link a esa misma orden: el equipo dejo de leerlas. Ahora son 3 lineas —
+    // que se creo, que falta hacer, y el link. El detalle sigue completo en Booqable.
+    // `ext.notas` tampoco se pierde: ya se guarda como nota DENTRO de la orden (ver notaL arriba).
+    const MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+    const DIAS = ['dom', 'lun', 'mar', 'mie', 'jue', 'vie', 'sab'];
+    const fechaCorta = function (iso, hora) {   // "2026-09-10","09:00" -> "jue 10-sep 9:00"
+      const d = new Date(String(iso) + 'T12:00:00');
+      if (isNaN(d)) return String(iso) + ' ' + String(hora || '');
+      return DIAS[d.getDay()] + ' ' + d.getDate() + '-' + MESES[d.getMonth()] +
+        ' ' + String(hora || '').replace(/^0/, '');
+    };
+    const lineas = [];
+    for (const r of resultados) {
+      const eq = r.agregados.length
+        ? r.agregados.slice(0, 3).join(' + ') +
+          (r.agregados.length > 3 ? ' +' + (r.agregados.length - 3) + ' mas' : '')
+        : 'sin equipo definido';
+      lineas.push('\u{1F4E6} Borrador ' +
+        (r.number ? '#' + r.number : (r.soloPreguntas ? '(no creado)' : '(sin numero)')) +
+        ' \u00b7 ' + fechaCorta(r.fi, r.hIni) + ' \u2192 ' + fechaCorta(r.ff, r.hReg) +
+        (r.fechasAsumidas ? ' (fechas asumidas)' : '') + ' \u00b7 ' + eq);
     }
-    lineas.push('');
-    lineas.push(lineaCliente);
     if (previo && (ahora - previo.at) < 6 * 3600 * 1000) {
-      lineas.push('⚠️ Hace ' + Math.round((ahora - previo.at) / 60000) + ' min ya se habia creado ' +
-        (previo.numbers.length > 1 ? 'los borradores #' : 'el borrador #') + previo.numbers.join(', #') +
-        ' para este contacto.');
+      faltaCrit.push('OJO: hace ' + Math.round((ahora - previo.at) / 60000) + ' min ya se habia creado #' +
+        previo.numbers.join(', #'));
     }
-    Array.prototype.push.apply(lineas, detalle);
-    if (ext.notas) { lineas.push(''); lineas.push('Notas: ' + String(ext.notas).slice(0, 160)); }
+    // Las preguntas al cliente van literales (el equipo las copia y pega), maximo 2.
+    preguntasUnicas.slice(0, 2).forEach(function (q) { falta.push('preguntarle: "' + q + '"'); });
+    const todo = faltaCrit.concat(falta.filter(Boolean));
+    if (todo.length) {
+      const muestra = todo.slice(0, 4);
+      lineas.push('\u26a0\ufe0f Falta: ' + muestra.join(' \u00b7 ') +
+        (todo.length > 4 ? ' \u00b7 +' + (todo.length - 4) + ' mas (ver orden)' : ''));
+    }
+    resultados.forEach(function (r) {
+      if (r.orderId) lineas.push('\u{1F517} https://filmorent-sa-de-cv.booqable.com/orders/' + r.orderId);
+    });
     await draftPostComment(contactId, lineas.join('\n'));
 
     console.log('[draft-order] ' + resultados.length + ' orden(es) ' +
