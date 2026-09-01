@@ -141,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.52.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.53.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -463,9 +463,20 @@ app.post('/webhook/comentario-interno', (req, res) => {
     const c = ev.comment || ev.data || {};
     const texto = String(c.text || c.content || ev.text || '').trim();
     const autor = (c.user && ((c.user.firstName || '') + ' ' + (c.user.lastName || '')).trim()) || (ev.user && ev.user.firstName) || 'equipo';
-    // Ignorar los comentarios del PROPIO AI (empiezan con su marca) — 27-ago: ~20 corridas
-    // se gastaron en auto-disparos porque solo se filtraba el robot.
-    const esDelAI = /^(\u{1F916}|\u{1F6A8}|\u{1F4E6}|\u{1F4A1}|\u{1FA6A}|\u{23F3}|\u{1F4C4}|\u{1F50D})/u.test(texto) || /^AI( |:)/i.test(texto);
+    // Ignorar los comentarios del PROPIO AI para no ciclar — 27-ago: ~20 corridas se gastaron en
+    // auto-disparos porque solo se filtraba el robot.
+    // 1-sep-2026: volvio a pasar. El AI dejo una nota que empezaba con 🎬 (fuera de la lista fija
+    // de emojis), el webhook la tomo como comentario del EQUIPO y disparo una corrida sobre el
+    // mismo contacto, que termino escribiendole al cliente. Caso C⭑M (525122180).
+    // No se puede distinguir por autor: respond.io NO manda `c.user` en este webhook — los 18,476
+    // comentarios vistos llegaron todos como "equipo". Asi que la marca es el emoji inicial, y
+    // ahora vale CUALQUIER emoji, no una lista que hay que ir persiguiendo.
+    // Contrapartida asumida: si alguien del equipo arranca su nota con emoji, no dispara corrida
+    // al instante (el AI la ve igual en su barrido). El equipo escribe texto plano, asi que pesa poco.
+    // Se quito el viejo `/^AI( |:)/` : se comia el feedback del equipo. Si Barush escribe
+    // "AI: esto estuvo mal", eso ES para el AI y debe disparar corrida, no ignorarse. Ya no hace
+    // falta como marca propia porque el AI SIEMPRE arranca sus notas con emoji (ver skill).
+    const esDelAI = /^\s*\p{Extended_Pictographic}/u.test(texto);
     // PRESUPUESTO DE NOTAS INTERNAS (31-ago, Daniel: "exageradamente muchos mensajes internos,
     // esto va a hacer que no los lean" — caso Grupo Konstrukce, 6 notas en una tarde).
     // Este webhook recibe TAMBIEN los comentarios del propio AI: aqui se cuentan por contacto/dia
