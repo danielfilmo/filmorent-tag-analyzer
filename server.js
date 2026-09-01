@@ -141,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.53.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.54.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -342,6 +342,126 @@ app.post('/enviar-cliente', async (req, res) => {
   }
   return res.json({ ok: true, permitido: true });
 });
+
+// ============================================================
+// AUTO-BORRADOR v2 (1-sep-2026) — gatillo de creacion de orden borrador.
+// Reemplaza la heuristica de una sola linea que fallo con Erik De Leon (525233019):
+//   (a) evaluaba UN SOLO mensaje: el equipo venia en el de 13:17 y la fecha en el de 13:20;
+//   (b) la lista no tenia "knowled"/"godox" ni entendia "el dia 4".
+// Calibrado contra 18,446 mensajes entrantes reales de 2,272 conversaciones de respond.io.
+// PRINCIPIO: precision > cobertura. Un borrador basura cuesta API, ensucia Booqable de
+// produccion y llena de notas internas al equipo.
+// ============================================================
+const AD_VENTANA_MSGS = 6;              // maximo de mensajes del cliente que se miran juntos
+const AD_VENTANA_SEG  = 20 * 60;        // ...y solo si caben en 20 min (una rafaga, no la conversacion entera)
+const AD_COOLDOWN_MS  = 12 * 3600 * 1000;
+const AD_DEBOUNCE_MS  = 90 * 1000;
+
+// (1) TEXTO ENLATADO: plantillas de CTWA / quick replies de respond.io. Un saludo de anuncio
+// NO es un pedido. Bloquea ~4.5% de los mensajes, casi todos los "estudio" genericos.
+const RE_AD_ENLATADO = /^\s*(?:[¡!]*\s*hola[!¡,.\s]*)?(?:quiero m[aá]s informaci[oó]n|me gustar[ií]a conocer m[aá]s detalles sobre el estudio filmopocket|me gustar[ií]a conseguir m[aá]s informaci[oó]n sobre esto|me interesa rentar equipo[.,]?\s*vengo de la p[aá]gina:.*|quiero rentar un estudio|quiero rentar otro equipo|cual es el precio de renta por d[ií]a\??|[¿?]*\s*puedo reservar para un evento espec[ií]fico\??|[¿?]*\s*cu[aá]l es el costo de renta\??)\s*[!.¡?📹\s]*$/i;
+
+// (2) EQUIPO. La frontera izquierda (?<![a-z0-9áéíóúñ]) es la que mata "exceLENTE",
+// "GRANados" y las CURP que contienen "A7" ("SALM020302MSLNPRA7").
+const RE_AD_EQUIPO = /(?<![a-z0-9áéíóúñ])(?:sony|canon|nikon|fujifilm|panasonic|lumix|blackmagic|arri(?![a-z])|aputure|amaran|godox|knowled|nanlite|astera|skypanel|litemons|litepanel|elinchrom|profoto|dracast|kino\s?flo|sachtler|manfrotto|matthews|smallrig|tilta|rokinon|samyang|zeiss|sigma|tamron|laowa|angenieux|metabones|speedbooster|hollyland|solidcom|teradek|atomos|small\s?hd|sennheiser|r(?:o|ø)de(?![a-z])|shure|ecoflow|gopro|osmo|ronin|insta\s?360|dji|zhiyun|moza|feelworld|desview|neewer|dedolight|boya|saramonic|sandisk|angelbird|anton\s?bauer|fx\s?-?\s?(?:3|30|6|9)(?![a-z0-9])|fs\s?-?\s?(?:5|7)(?![a-z0-9])|a-?7(?:\s?(?:s|r|c|m|i|v|\d)+)?|a\s7(?:s|r|c|m|i|v|\d)+|zv\s?-?e\s?10|eos|r[3568](?![a-z0-9])|r50(?![a-z0-9])|mark\s?(?:i{1,3}v?|iv|\d+)|5d|6d|90d|d850|z[68](?![a-z0-9])|gh[56]|bmpcc|c\s?(?:70|300|500)(?![a-z0-9])|rs\s?-?\s?[234](?![a-z0-9])|scarlet|komodo|dsmc|mini\s?mag|atem|pyro|mars\s?400|sumo|ninja|702|f\s?-?\s?22\s?c?(?![a-z0-9])|\d{3}\s?bi(?![a-z])|600c|600d|1200d|300x|600x|60x|s\s?(?:30|60|120)\s?-?\s?c(?![a-z])|b7c|mc\s?rgb|light\s?dome|lp\s?-?e\s?\d+|np\s?-?f[wz]\s?\d+|en\s?-\s?el\s?-?\d+|v\s?-?mount|cf\s?express|xqd|\d{1,3}\s?(?:-\s?\d{1,3}\s?)?mm(?![a-z])|[ft]\s?\/?\s?\d(?:[.,]\d)?(?![a-z0-9])|montura\s?(?:e|pl|rf|ef|z|mft)(?![a-z])|(?:ef|rf|fe)\s?-?\s?\d|fish\s?-?\s?eye|gran\s?angular|teleobjetivo|macro(?![a-z])|lentes?(?![a-z])|[oó]pticas?(?![a-z])|c[aá]maras?(?![a-z])|tripi[eé]s?|tr[ií]pode|monopie|estabili[a-z]*|gimbal|dron(?:e|es)?(?![a-z])|monitor(?:es)?|telepro|prom?p?ter|micr[oó]fonos?|lavalier|solapa|balita|boom\s?pole|grabadora|switcher|capturadora|inter\s?-?\s?comunicador|chi?[cí]charo|softbox|octabox|sombrilla|beauty\s?dish|ciclorama|fresnel|m[aá]quina\s?de\s?humo|flash(?:es)?|speedlight|panel(?:es)?\s?led|c\s?-?\s?stand|matte\s?box|follow\s?focus|dolly|slider|rebotador|difusor|bandera|cargador(?:es)?|bater[ií]as?|tarjeta\s?(?:sd|cf|de\s?memoria)|planta\s?de\s?luz|luces|l[aá]mparas?|luz\s+(?:extra|rgb|led|dura|suave|continua|de\s?relleno)|rgb|kit\s+de|equipo\s+de\s+(?:comunicaci|ilumin|audio|video|foto|c[aá]mara)|paquete\s+(?:de\s+)?(?:c[aá]mara|lente|luces|equipo)|red\s+(?:scarlet|komodo|dsmc|mini|brick|montura)|proyector(?:es)?|bocinas?|partybox|jbl|bose|meg[aá]fono|aud[ií]fonos|iphone|ipad|century|centurys|centuries|yo\s?-?yo|sandbags?|sanbags?|manzaneros?|apple\s?box|tramoya|patas? de garza|gritcloth|snoot|gobo|hdmi|sdi|splitter|croma|green\s?screen|fondo\s+(?:blanco|negro|verde|infinito)|backdrop|diademas?|intercomunicaci|steadicam|calibrador|(?:estudio|sala)\s*(?:filmo\s*)?(?:poc?ket|grand)|filmo\s*(?:poc?ket|grand)|(?:rent|apart|reserv|separ|cotiz|busc|quier|ocup|necesit|requier|disponib|libre|agend|sala|sesi[oó]n|precio|costo|tarifa|medida|espacio|hora)[a-zñáéíóú]*[^.!?\n]{0,20}estudio|estudio[^.!?\n]{0,15}(?:fotogr[aá]fico|de\s+(?:filmaci|grabaci|foto|video)|para\s+(?:un[ao]?\s+)?(?:sesi|grabaci|foto|video|podcast)))/i;
+
+// (3) FECHA. OJO con el guion: "24-70" y "70-200" son focales, NO fechas — por eso las fechas
+// numericas solo se aceptan con "/" (4/9) o en ISO. Y "el dia 4" / "del 4 al 6" / "el 4 y 5"
+// si entran (era la mitad de la falla de Erik).
+const RE_AD_FECHA = /(?<![a-z0-9áéíóúñ])(?:hoy(?![a-z])|ma[ñn]ana|pasado\s+ma[ñn]ana|lunes|martes|mi[eé]rcoles|miercoles|jueves|viernes|s[aá]bado|sabado|domingo|finde(?![a-z])|fin\s+de\s+semana|pr[oó]xima\s+semana|semana\s+que\s+(?:entra|viene)|esta\s+semana|(?:0?[1-9]|[12]\d|3[01])\s*(?:de\s*)?(?:ene|feb|mar|abr|may|jun|jul|ago|sept?|oct|nov|dic)[a-z]*|(?:ene|feb|mar|abr|may|jun|jul|ago|sept?|oct|nov|dic)[a-z]*\s*\.?\s*(?:0?[1-9]|[12]\d|3[01])(?![0-9])|d[ií]as?\s+(?:0?[1-9]|[12]\d|3[01])(?![0-9:])|(?:del?|para\s+el|desde\s+el|a\s+partir\s+del|el)\s+(?:0?[1-9]|[12]\d|3[01])\s*(?:al|a|y|hasta\s+el)\s*(?:0?[1-9]|[12]\d|3[01])(?![0-9a-z])|(?:para\s+el|el|del)\s+(?:0?[1-9]|[12]\d|3[01])(?!(?:[0-9a-zº°]|\s*(?:mil|pesos|%|[-–]\s*\d|hrs?\b|horas?\b|:|de\s+la\s+(?:tarde|ma[ñn]ana|noche)|[ap]\.?\s?m\b)))|\d{1,2}\s*\/\s*\d{1,2}(?:\s*\/\s*\d{2,4})?|\d{4}-\d{2}-\d{2})/i;
+
+// (4) NEGACION explicita: el cliente dice que ya no. Bloquea siempre.
+const RE_AD_NEGACION = /(ya no (?:voy|vamos|lo|los|la|las|es|ser[aá]|necesit|ocup|requier|quer|va|van)|se cancel|me cancelaron|cancelar la renta|cancelo la|(?:ya\s+)?(?:consegu[ií]|encontr[eé]|rent[eé])\s+(?:otro|otra|en otro|con otro)|ya consegu[ií]|ya encontr[eé]|ya tengo (?:otro|otra|uno|una)|al final (?:no|se fueron|nos)|nosotros (?:tenemos|llevamos|ponemos) (?:todas?|todo|el|la|los|las)|pude conseguir|mejor (?:no|lo dejamos|otro d[ií]a))/i;
+
+// (5) POST-RENTA DURO: habla de una renta que YA existe, en pasado o en curso. Bloquea siempre.
+const RE_AD_POSTRENTA_DURO = /(que rentamos ayer|que rent[eé] ayer|se rent[oó] para|ya (?:lo|la|los|las) (?:entregu|devolv|regres|dej)|ya voy en camino|vamos en camino|van en camino|voy a dejar|paso a dejar|pasar a dejar|vengo a dejar|pendiente de entregar|se me qued[oó]|reparaci[oó]n|mantenimiento|se da[ñn][oó]|no prende|no sirve|no funciona|fui por (?:el|la|un|una|los|las)|(?:lo|la|los|las) recog[ií](?![a-z])|estar[eé] usando|estoy usando|ya realic[eé] el pedido)/i;
+
+// (6) POST-RENTA BLANDO: ambiguo. "para entregar el lunes" puede ser la devolucion de lo que
+// esta pidiendo AHORA. Solo bloquea si la ventana NO trae intencion de rentar.
+const RE_AD_POSTRENTA_BLANDO = /(para entregar (?:el|la|los|las)|regresar (?:el|la|los|las)|pas(?:ar|o|ar[ií]a|amos|an) por (?:el|la|los|las)|ir a recoger|autorizo que|recoja la renta)/i;
+const RE_AD_INTENCION = /(rentar|renta de|de renta|rento|apartar|separar|reservar|agendar|cotiz|presupuesto|disponib|tienen|tendr[aá]n?|manejan|cu[aá]nto (?:cuesta|sale|es)|precio|costo|me interesa|quisiera|quiero|necesito|ocupo|requiero|busco|buscando|checar|libre)/i;
+
+function adTieneEquipo(t) {
+  const s = String(t || "");
+  if (RE_AD_ENLATADO.test(s.trim())) return false;
+  return RE_AD_EQUIPO.test(s.toLowerCase());
+}
+
+// Decide sobre la VENTANA completa (equipo y fecha pueden venir en mensajes distintos).
+function adDispara(ventana) {
+  const win = (ventana || []).filter(function (t) { return t && String(t).trim(); }).slice(-AD_VENTANA_MSGS);
+  if (!win.length) return false;
+  const blob = win.join(" \n ");
+  if (RE_AD_NEGACION.test(blob)) return false;
+  if (RE_AD_POSTRENTA_DURO.test(blob)) return false;
+  if (RE_AD_POSTRENTA_BLANDO.test(blob) && !RE_AD_INTENCION.test(blob)) return false;
+  return win.some(adTieneEquipo) && win.some(function (t) { return RE_AD_FECHA.test(t); });
+}
+
+// server.js solo recibe el mensaje que acaba de llegar: los anteriores hay que pedirlos.
+// Si la API falla, se CAE AL COMPORTAMIENTO ACTUAL (un solo mensaje) — nunca tira el gatillo.
+async function adVentana(contactId, textoActual) {
+  try {
+    if (!RESPONDIO_API_KEY) return [textoActual];
+    const r = await backfillFetchMessages(contactId, 20, 0);
+    if (!r || r.status !== 200 || !Array.isArray(r.messages)) {
+      console.error("[auto-draft] ventana: respond.io HTTP " + ((r && r.status) || "?") + " -> caigo a 1 mensaje");
+      return [textoActual];
+    }
+    if (!r.messages.length) return [textoActual];
+    const ahoraSeg = Date.now() / 1000;
+    const prev = r.messages
+      .filter(function (m) { return m && m.traffic === "incoming"; })
+      // respond.io no regresa timestamp: la hora vive en messageId/1e6 (epoch en segundos).
+      .map(function (m) {
+        return {
+          t: String((m.message && (m.message.text || m.message.caption)) || "").slice(0, 200),
+          ts: Number(m.messageId) / 1e6
+        };
+      })
+      .filter(function (x) { return x.t.trim() && isFinite(x.ts) && (ahoraSeg - x.ts) <= AD_VENTANA_SEG; })
+      .sort(function (a, b) { return a.ts - b.ts; })
+      .map(function (x) { return x.t; });
+    // El webhook suele ganarle a la indexacion de la API: garantizamos que el mensaje actual este.
+    if (!prev.length || prev[prev.length - 1] !== textoActual) prev.push(textoActual);
+    return prev.slice(-AD_VENTANA_MSGS);
+  } catch (e) {
+    console.error("[auto-draft] ventana fallo (" + e.message + ") -> caigo a 1 mensaje");
+    return [textoActual];
+  }
+}
+
+function adGatillo(contactId, textoRaw) {
+  const texto = String(textoRaw || "").slice(0, 200);
+  if (!texto.trim()) return;
+  // PRE-FILTRO BARATO: si el mensaje que ACABA de llegar no aporta ni equipo ni fecha, no
+  // gastamos llamada a respond.io. Tambien evita que un "gracias" reabra una ventana vieja.
+  if (!adTieneEquipo(texto) && !RE_AD_FECHA.test(texto)) return;
+  global.__autoDraftCooldown = global.__autoDraftCooldown || {};
+  global.__autoDraftTimer = global.__autoDraftTimer || {};
+  if (Date.now() - (global.__autoDraftCooldown[contactId] || 0) < AD_COOLDOWN_MS) return;
+  (async function () {
+    const ventana = await adVentana(contactId, texto);
+    if (!adDispara(ventana)) return;
+    if (Date.now() - (global.__autoDraftCooldown[contactId] || 0) < AD_COOLDOWN_MS) return;
+    // DEBOUNCE 90s REINICIABLE: cada mensaje nuevo de la rafaga reinicia el reloj, asi el
+    // copiloto lee la rafaga COMPLETA y se dispara UNA sola vez (el caso Erik eran 2 mensajes).
+    if (global.__autoDraftTimer[contactId]) clearTimeout(global.__autoDraftTimer[contactId]);
+    global.__autoDraftTimer[contactId] = setTimeout(function () {
+      delete global.__autoDraftTimer[contactId];
+      global.__autoDraftCooldown[contactId] = Date.now();   // el cooldown de 12h corre desde el disparo real
+      const ks = Object.keys(global.__autoDraftCooldown);
+      if (ks.length > 2000) ks.slice(0, 1000).forEach(function (k) { delete global.__autoDraftCooldown[k]; });
+      fetch("http://127.0.0.1:" + (process.env.PORT || 10000) + "/webhook/draft-order", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contactId: contactId, origen: "auto" })
+      }).catch(function (e) { console.error("[auto-draft] " + e.message); });
+    }, AD_DEBOUNCE_MS);
+    console.log("[auto-draft] gatillo equipo+fecha para contacto " + contactId +
+      " (ventana " + ventana.length + " msg, dispara en 90s)");
+  })().catch(function (e) { console.error("[auto-draft gatillo async] " + e.message); });
+}
+
 app.post('/webhook/mensaje-entrante', (req, res) => {
   try {
     const ev = req.body || {};
@@ -376,29 +496,10 @@ app.post('/webhook/mensaje-entrante', (req, res) => {
       if (colaMensajes.length > 200) colaMensajes = colaMensajes.slice(-200);
       console.log('[mensaje-entrante] contacto ' + contactId + ' en cola (' + colaMensajes.length + ')');
 
-      // ---- AUTO-BORRADOR (31-ago, aprobado por Daniel): si el cliente trae EQUIPO + FECHAS
-      // concretas, se dispara el copiloto sin esperar el Shortcut. Heuristica barata en codigo;
-      // la extraccion con IA decide el detalle. Cooldown 12h por contacto (el draft-order ademas
-      // trae su propio dedup contra ordenes existentes).
-      try {
-        const t = String(texto || '').toLowerCase();
-        const tieneEquipo = /(fx3|fx30|fx6|fx9|a7|amaran|aputure|astera|skypanel|litemons|elinchrom|c[- ]?stand|tripie|tr\u00edpode|estudio|pocket|grand|dron|drone|lente|c\u00e1mara|camara|gimbal|ronin|monitor|teleprompter|micr\u00f3fono|microfono|hollyland|luz|luces|flash|kit)/.test(t);
-        const tieneFecha = /(ma\u00f1ana|manana|hoy|pasado ma\u00f1ana|lunes|martes|mi\u00e9rcoles|miercoles|jueves|viernes|s\u00e1bado|sabado|domingo|\d{1,2}\s*(de\s*)?(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)|\d{1,2}\/\d{1,2})/.test(t);
-        if (tieneEquipo && tieneFecha) {
-          global.__autoDraftCooldown = global.__autoDraftCooldown || {};
-          const previo = global.__autoDraftCooldown[contactId] || 0;
-          if (Date.now() - previo > 12 * 3600 * 1000) {
-            global.__autoDraftCooldown[contactId] = Date.now();
-            setTimeout(function () {
-              fetch('http://127.0.0.1:' + (process.env.PORT || 10000) + '/webhook/draft-order', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contactId: contactId, origen: 'auto' })
-              }).catch(function (e) { console.error('[auto-draft] ' + e.message); });
-            }, 90 * 1000); // 90s: dejar que el cliente termine su rafaga de mensajes
-            console.log('[auto-draft] gatillo equipo+fechas para contacto ' + contactId + ' (en 90s)');
-          }
-        }
-      } catch (e) { console.error('[auto-draft gatillo] ' + e.message); }
+      // ---- AUTO-BORRADOR v2 (1-sep-2026): la logica vive en adGatillo() (arriba del handler).
+      // Ventana de rafaga (equipo y fecha pueden venir en mensajes distintos) + regex calibrados
+      // contra 18,446 mensajes reales + candados de negacion/post-renta. Nunca lanza excepcion.
+      try { adGatillo(contactId, texto); } catch (e) { console.error('[auto-draft gatillo] ' + e.message); }
     } else if (contactId && traffic === 'outgoing') {
       // ---- VERIFICACION DE ORDEN ENVIADA (31-ago, aprobado por Daniel tras el caso Rocca
       // #10851: el equipo mando la orden sin la Amaran 150C y lo noto el CLIENTE): cuando sale
@@ -5035,6 +5136,14 @@ app.post('/webhook/draft-order', async (req, res) => {
         s.equipos.filter(function (x) { return x && x.descripcion; }).length;
     }).slice(0, 6);
     if (!solicitudes.length) {
+      // 1-sep-2026: si el disparo fue AUTOMATICO (no lo pidio un humano) y no hay nada que crear,
+      // NO se deja nota. Medido sobre 100 conversaciones reales: el gatillo v2 acierta ~7 de cada 10,
+      // y sin esto cada falso positivo le mandaba un aviso de "no hice nada" al equipo — que es justo
+      // lo que hace que dejen de leer las notas. Asi un falso positivo cuesta centavos de API y nada mas.
+      if (String((req.body || {}).origen || '') === 'auto') {
+        console.log('[draft-order] auto sin equipos detectados en ' + contactId + ' — sin nota (silencioso)');
+        return res.json({ ok: false, error: 'sin equipos pendientes detectados', ya_pedido: yaPedido, silencioso: true });
+      }
       const l = ['\ud83e\udd16 No cree ningun borrador: no hay nada pendiente en esta conversacion.'];
       if (yaPedido.length) {
         l.push('Lo que pidio ya esta levantado:');
