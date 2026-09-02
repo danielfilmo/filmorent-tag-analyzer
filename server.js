@@ -141,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.55.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.56.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -891,6 +891,8 @@ REGLA 5 - ENFOCARSE EN LO IMPORTANTE: Evalua lo que REALMENTE importa para el ne
 - Se busco resolver su necesidad?
 - Se contribuyo a concretar la renta?
 NO buscar defectos artificiales. Si el agente hizo bien su trabajo, di que lo hizo bien.
+
+REGLA 7 - CERRAR POR SILENCIO DEL CLIENTE ES CORRECTO (31-ago-2026): Si el equipo respondio la ultima pregunta del cliente y el CLIENTE dejo de contestar, cerrar la conversacion es lo correcto y NUNCA se penaliza como "falta de seguimiento" ni baja "proactividad". "Seguimiento" se mide UNICAMENTE asi: ¿quedo alguna pregunta o pedido del cliente SIN respuesta del equipo? Si no quedo nada sin responder, la proactividad es alta aunque la renta no se haya concretado. La causa "sin_respuesta_cliente" describe al cliente, NO al agente: no se usa para bajar calificaciones. Un agente que NO cierra conversaciones muertas para evitar ser evaluado esta haciendo algo peor que cerrarlas; jamas premiar eso.
 
 REGLA 6 - FEEDBACK UTIL: El feedback debe ser ACCIONABLE y ENFOCADO. Maximo 2 oraciones: 1 cosa positiva + 1 area de mejora (SOLO si realmente hay algo importante que mejorar). Si el agente hizo bien su trabajo, no inventes criticas.
 
