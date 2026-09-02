@@ -141,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.54.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.55.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -333,6 +333,35 @@ app.post('/cola_analisis/done', (req, res) => {
 // (segunda-linea-daemon.mjs). Elimina la espera de 5 min del cron: el AI contesta al momento.
 // La cola es efimera (se pierde en redeploy): aceptable, el cron de 5 min sigue de red de seguridad.
 let colaMensajes = [];
+// ===== SENSOR DE ACTIVIDAD POR CONTACTO (v8.55.0, 1-sep-2026) ===================
+// Daniel: "que se analicen TODAS las conversaciones". El analizador de la Mac cambio su disparo
+// de "conversacion cerrada" a "24 h sin mensajes". Para encontrar clientes VIEJOS que reviven
+// (no aparecen paginando contactos por created_at), este webhook recuerda el ultimo mensaje
+// ENTRANTE por contacto. La Mac lo lee cada 25 min (GET /actividad) y lo funde en su propio
+// actividad.json: perderlo en un deploy solo cuesta la ventana entre dos lecturas.
+const ACTIVIDAD_FILE = path.join(__dirname, 'actividad_contactos.json');
+let actividad = {};
+try { actividad = JSON.parse(fs.readFileSync(ACTIVIDAD_FILE, 'utf8')) || {}; } catch (e) {}
+const ACTIVIDAD_DIAS = 14, ACTIVIDAD_MAX = 3000;
+function actividadRegistrar(contactId, nombre) {
+  try {
+    actividad[String(contactId)] = { ts: Date.now(), nombre: String(nombre || '').slice(0, 80) };
+    const lim = Date.now() - ACTIVIDAD_DIAS * 86400000;
+    Object.keys(actividad).forEach(function (k) { if ((actividad[k].ts || 0) < lim) delete actividad[k]; });
+    const ids = Object.keys(actividad);
+    if (ids.length > ACTIVIDAD_MAX) {
+      ids.sort(function (a, b) { return (actividad[a].ts || 0) - (actividad[b].ts || 0); });
+      ids.slice(0, ids.length - ACTIVIDAD_MAX).forEach(function (k) { delete actividad[k]; });
+    }
+    fs.writeFileSync(ACTIVIDAD_FILE, JSON.stringify(actividad));
+  } catch (e) { console.error('actividadRegistrar: ' + e.message); }
+}
+app.get('/actividad', (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || req.query.key !== process.env.REWARDS_HITOS_KEY) {
+    return res.status(403).json({ ok: false });
+  }
+  res.json({ ok: true, dias: ACTIVIDAD_DIAS, contactos: actividad });
+});
 // Proxy de envio a clientes usado por la Mac: aqui vive el candado del modo seco.
 app.post('/enviar-cliente', async (req, res) => {
   if (!process.env.REWARDS_HITOS_KEY || (req.body || {}).key !== process.env.REWARDS_HITOS_KEY) return res.status(403).json({ ok: false });
@@ -495,6 +524,7 @@ app.post('/webhook/mensaje-entrante', (req, res) => {
       else colaMensajes.push({ contactId, nombre, texto: String(texto).slice(0, 200), ts: Date.now() });
       if (colaMensajes.length > 200) colaMensajes = colaMensajes.slice(-200);
       console.log('[mensaje-entrante] contacto ' + contactId + ' en cola (' + colaMensajes.length + ')');
+      actividadRegistrar(contactId, nombre);   // v8.55: sensor para el analizador por inactividad
 
       // ---- AUTO-BORRADOR v2 (1-sep-2026): la logica vive en adGatillo() (arriba del handler).
       // Ventana de rafaga (equipo y fecha pueden venir en mensajes distintos) + regex calibrados
@@ -4793,6 +4823,9 @@ app.post('/webhook/draft-order', async (req, res) => {
     // se bajan y se pasan a Claude con vision. Antes solo salia "[image]" en el
     // transcript y el borrador quedaba vacio.
     const imagenesCliente = [];
+    // PDFs que mando el CLIENTE (constancia fiscal, comprobante, lista de equipo, cotizacion de otra
+    // casa) — 2-sep-2026, Daniel: "es importante que pueda leer PDFs". Antes se saltaban: solo '[file]'.
+    const pdfsCliente = [];
     const filas = msgs.map(function (m, i) {
       const who = m.traffic === 'incoming' ? 'CLIENTE' : 'FILMORENT';
       const msg = m.message || {};
@@ -4812,12 +4845,16 @@ app.post('/webhook/draft-order', async (req, res) => {
         const urlAtt = att.url || att.fileUrl || '';
         const esDoc = att.type === 'file' || /invoice|cotiza|orden|pro_forma|proforma|\.pdf/.test(nombre);
         const esImagen = att.type === 'image' || /\.(jpe?g|png|webp|gif)(\?|$)/.test(String(urlAtt).toLowerCase());
+        const esPdf = /\.pdf(\?|$)/.test(nombre) || /pdf/i.test(String(att.mimeType || att.mime || ''));
         if (who === 'FILMORENT' && esDoc) {
           idxUltimoDoc = i;
           t = '[FILMORENT LE ENVIO UN DOCUMENTO (cotizacion/orden): ' + (att.fileName || 'documento') + ']';
         } else if (who === 'CLIENTE' && esImagen && urlAtt) {
           imagenesCliente.push({ idx: i, url: urlAtt });
           t = '[IMAGEN ' + imagenesCliente.length + ' DEL CLIENTE — va adjunta abajo, LEELA]';
+        } else if (who === 'CLIENTE' && esPdf && urlAtt) {
+          pdfsCliente.push({ idx: i, url: urlAtt, nombre: att.fileName || 'documento.pdf' });
+          t = '[PDF ' + pdfsCliente.length + ' DEL CLIENTE (' + (att.fileName || 'documento.pdf') + ') — va adjunto abajo, LEELO]';
         } else {
           t = '[' + (att.type || 'adjunto') + ']';
         }
@@ -4855,6 +4892,27 @@ app.post('/webhook/draft-order', async (req, res) => {
     }
     if (imagenesRelevantes.length) {
       console.log('[draft-order] imagenes del cliente: ' + imagenesRelevantes.length + ' relevantes, ' + bloquesImagen.length + ' bajadas OK');
+    }
+    // PDFs del cliente (posteriores al ultimo documento enviado), como bloques 'document' (la API
+    // los lee nativamente). Tope 2, 4.5 MB c/u, y se valida la cabecera %PDF- (respond.io a veces
+    // sirve el CDN sin content-type).
+    const pdfsRelevantes = (idxUltimoDoc >= 0
+      ? pdfsCliente.filter(function (pd) { return pd.idx > idxUltimoDoc; })
+      : pdfsCliente).slice(-2);
+    let pdfsOk = 0;
+    for (const pd of pdfsRelevantes) {
+      try {
+        const pr = await fetch(pd.url);
+        if (!pr.ok) { console.error('[draft-order] pdf HTTP ' + pr.status); continue; }
+        const buf = Buffer.from(await pr.arrayBuffer());
+        if (buf.length > 4500000) { console.error('[draft-order] pdf muy grande, lo salto'); continue; }
+        if (buf.slice(0, 5).toString() !== '%PDF-') { console.error('[draft-order] adjunto no es PDF'); continue; }
+        bloquesImagen.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') } });
+        pdfsOk++;
+      } catch (e) { console.error('[draft-order] pdf no bajo: ' + e.message); }
+    }
+    if (pdfsRelevantes.length) {
+      console.log('[draft-order] pdfs del cliente: ' + pdfsRelevantes.length + ' relevantes, ' + pdfsOk + ' bajados OK');
     }
 
     const nombreContacto = (((contact.firstName || '') + ' ' + (contact.lastName || '')).trim()) || null;
@@ -5080,7 +5138,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       // Con imagenes: van como bloques de vision + instruccion de leerlas.
       let userContent = contenido;
       if (bloquesImagen.length) {
-        contenido += '\n\nADJUNTAS VAN ' + bloquesImagen.length + ' IMAGEN(ES) QUE MANDO EL CLIENTE ' +
+        contenido += '\n\nADJUNTOS VAN ' + bloquesImagen.length + ' ARCHIVO(S) (IMAGENES Y/O PDF) QUE MANDO EL CLIENTE ' +
           '(listas de equipo, capturas de la tienda, fotos). LEELAS CON CUIDADO: el equipo pedido puede ' +
           'venir SOLO en las imagenes. Extrae de ahi los equipos y cantidades igual que si vinieran en texto. ' +
           'Si una imagen no se entiende, anotalo en "notas".';
@@ -5338,7 +5396,7 @@ app.post('/webhook/draft-order', async (req, res) => {
         if (agregados.length) notaL.push('Equipo agregado: ' + agregados.join(' | '));
         if (noEncontrados.length) notaL.push('NO ENCONTRADO en catalogo (agregar a mano): ' + noEncontrados.join(', '));
         if (fallaronReserva.length) notaL.push('Fallo la reserva (agregar a mano): ' + fallaronReserva.join(', '));
-        if (bloquesImagen.length) notaL.push('El cliente mando ' + bloquesImagen.length + ' imagen(es) con su lista; se leyeron con AI — verificar contra el chat.');
+        if (bloquesImagen.length) notaL.push('El cliente mando ' + bloquesImagen.length + ' adjunto(s) (imagen/PDF) con su lista; se leyeron con AI — verificar contra el chat.');
         if (ext && ext.notas) notaL.push('Notas del chat: ' + String(ext.notas).slice(0, 300));
         await booqableWrite('POST', '/notes', {
           data: { type: 'notes', attributes: { body: notaL.join('\n'), owner_id: orderId, owner_type: 'orders' } }
