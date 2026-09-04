@@ -141,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.56.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.57.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1831,13 +1831,34 @@ const REWARDS_CATALOG = [
 // nuevo), 100→1, 250→2, 500→3, 800→4, 1200→5. Reglas de mostrador que NO
 // cambian (solo copy): 1 canje por orden, el folio no da cambio, la orden debe
 // ser ≥ 2× el crédito.
+// Es esta linea de la orden un credito de Rewards? Se prueba por CONTENIDO, no por
+// prefijo. Antes era title.indexOf('filmorent rewards') === 0, que solo atrapaba las
+// que escribe el server. El camino del folio NO escribe la linea: la teclea el
+// empleado con el titulo que se le ocurra, y "Descuento Filmorent Rewards" o "Canje
+// de puntos RWD-..." pasaban invisibles, dejando apilar un segundo credito en la misma
+// orden (revision adversarial 27-ago-2026). Con el techo en $10,000 eso podia dejar la
+// orden en negativo. Basta la palabra 'rewards': en un catalogo de camaras, lentes y
+// luces ninguna linea legitima la menciona. Ante la duda conviene errar por exceso: un
+// falso positivo BLOQUEA un canje (se destraba a mano); un falso negativo regala dinero.
+const REWARDS_LINEA_CREDITO = /\brewards\b|\bRWD-|\bCUP-/i;
+function rewardsEsLineaCredito(titulo) {
+  return REWARDS_LINEA_CREDITO.test(String(titulo || ''));
+}
+
 const REWARDS_CREDIT_LEVELS = [
   { id: 6, points: 50,   cap_cents: 10000 },   // $100
   { id: 1, points: 100,  cap_cents: 25000 },   // $250
   { id: 2, points: 250,  cap_cents: 70000 },   // $700
   { id: 3, points: 500,  cap_cents: 160000 },  // $1,600
   { id: 4, points: 800,  cap_cents: 280000 },  // $2,800
-  { id: 5, points: 1200, cap_cents: 450000 }   // $4,500
+  { id: 5, points: 1200, cap_cents: 450000 },  // $4,500
+  // 27-ago-2026 (Daniel): el tope de $4,500 le sabia a nada al cliente que renta
+  // $300k al ano — el programa dejaba de moverlo. Techo nuevo $10,000, con un
+  // peldano intermedio para que no haya un salto seco. El candado real no es el
+  // monto sino que la orden sea >= 2x el credito: para usar $10,000 la renta
+  // tiene que ser de $20,000 o mas.
+  { id: 7, points: 1800, cap_cents: 700000 },  // $7,000
+  { id: 8, points: 2500, cap_cents: 1000000 }  // $10,000
 ];
 
 // "$1,600" estilo es-MX sin centavos (manual: no depende de ICU en el runtime).
@@ -1849,13 +1870,19 @@ function rewardsFormatMXN(cents) {
 // Catálogo personalizado del miembro. DEDUPE: si el tope del ticket hace que
 // dos niveles den el mismo crédito, solo se ofrece el de MENOS puntos — cada
 // nivel listado debe dar un crédito estrictamente mayor que el anterior.
+// avgTicketCents ya NO topa nada; se conserva el parametro para no romper llamadores.
 function rewardsCatalogFor(avgTicketCents) {
-  // 50% del ticket promedio, redondeado a múltiplos de $50 (5000 centavos)
-  const halfTicket = Math.round((avgTicketCents || 0) / 2 / 5000) * 5000;
+  // 27-ago-2026 (Daniel): "no creo que deba de haber un limite del 50% del ticket
+  // promedio, con el 50% del maximo de la renta es suficiente". Habia DOS topes y la
+  // gente los confundia: uno recortaba la escalera segun el ticket PROMEDIO historico
+  // (un cliente de ticket $1,000 nunca veia mas de $500 aunque juntara 1,200 puntos) y
+  // otro exige que la orden sea >= 2x el credito. Queda solo el segundo: es el que de
+  // verdad protege el margen y el unico que el equipo puede explicar ("el descuento
+  // nunca pasa de la mitad de esa renta"). Los puntos ya los pago el cliente.
   const catalog = [];
   let prevCredit = 0;
   for (const lvl of REWARDS_CREDIT_LEVELS) {
-    const credit = Math.max(10000, Math.min(lvl.cap_cents, halfTicket)); // piso $100
+    const credit = lvl.cap_cents;
     if (credit <= prevCredit) continue;
     prevCredit = credit;
     catalog.push({
@@ -1863,7 +1890,12 @@ function rewardsCatalogFor(avgTicketCents) {
       // 26-ago-2026 (Daniel): nunca "crédito" de cara al cliente — suena a deuda
       name: 'Descuento de ' + rewardsFormatMXN(credit) + ' en tu próxima renta',
       points: lvl.points,
-      credito_cents: credit
+      credito_cents: credit,
+      // Sin el tope del ticket, el UNICO candado es la orden >= 2x. Y un folio nace
+      // 'pendiente', lo cual YA descuenta los puntos: alguien podria quemar 2,500 pts
+      // en un descuento de $10,000 que nunca va a poder usar. Por eso la renta minima
+      // se publica junto a cada opcion, para que la vea ANTES de canjear.
+      renta_minima_cents: credit * 2
     });
   }
   return catalog;
@@ -3722,7 +3754,7 @@ app.post('/rewards/pagar', async (req, res) => {
     const ld = await booqableGet('/lines?filter[order_id]=' + order.id + '&page[size]=100');
     const lineasOrden = (ld.data || []).filter(l => !((l.attributes || {}).archived));
     const yaTiene = lineasOrden.some(l =>
-      String((l.attributes || {}).title || '').toLowerCase().indexOf('filmorent rewards') === 0);
+      rewardsEsLineaCredito((l.attributes || {}).title));
     if (yaTiene) {
       return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene un descuento Rewards aplicado' });
     }
@@ -3982,7 +4014,7 @@ app.post('/rewards/cupon/aplicar', async (req, res) => {
     }
     const ld = await booqableGet('/lines?filter[order_id]=' + order.id + '&page[size]=100');
     const lineasOrden = (ld.data || []).filter(l => !((l.attributes || {}).archived));
-    const yaTiene = lineasOrden.some(l => String((l.attributes || {}).title || '').toLowerCase().indexOf('filmorent rewards') === 0);
+    const yaTiene = lineasOrden.some(l => rewardsEsLineaCredito((l.attributes || {}).title));
     if (yaTiene) return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene un descuento Rewards aplicado' });
     const esVenta = lineasOrden.some(l => {
       const t = String((l.attributes || {}).title || '').toLowerCase().trim();
@@ -4428,6 +4460,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
     // este endpoint solo marcaba el Ledger y NINGUNA capa validaba la orden —
     // los candados vivían solo en /pagar. Mismos checks, solo lectura.
     let creditoCents = 0;
+    let duenoFolio = '';   // customer_id del dueno del folio (candado de abajo)
     try {
       const fq = await fetch(REWARDS_SHEETS_URL + '?action=folio&folio=' + encodeURIComponent(folio),
         { redirect: 'follow' }).then(r2 => r2.json());
@@ -4443,6 +4476,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
         // El crédito viene en el nombre de la recompensa ("Crédito de $700 en ...")
         const m = String((fq.folio || {}).reward || '').match(/\$\s?([\d,]+)/);
         if (m) creditoCents = parseInt(m[1].replace(/,/g, ''), 10) * 100;
+        duenoFolio = String((fq.folio || {}).customer_id || '').trim();
       }
     } catch (eF) { /* si el Ledger no responde aquí, el POST de abajo lo re-checa */ }
 
@@ -4450,6 +4484,24 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
     const orderF = (odF.data || [])[0];
     if (!orderF) return res.status(404).json({ ok: false, error: 'no existe la orden #' + orderNumber });
     const oaF = orderF.attributes || {};
+
+    // ── EL FOLIO ES DE QUIEN LO GANO ──────────────────────────────────────────
+    // Hasta hoy este endpoint recibia solo {folio, order_number} y NUNCA comparaba de
+    // quien era el folio contra de quien es la orden: era un instrumento AL PORTADOR.
+    // Combinado con que /rewards/redeem no pide sesion (basta el correo, que no es
+    // secreto), la cadena era: genero un folio con el correo de un cliente con muchos
+    // puntos, lo presento con MI orden, y salen sus puntos como descuento mio.
+    // Encontrado en la revision adversarial del 27-ago-2026 al subir el techo de
+    // $4,500 a $10,000 — el agujero ya existia, el cambio solo subia lo extraible.
+    if (duenoFolio && String(oaF.customer_id || '') !== duenoFolio) {
+      console.error('[rewards] folio ' + folio + ' de ' + duenoFolio +
+        ' intentado en orden #' + orderNumber + ' de ' + oaF.customer_id);
+      return res.status(409).json({
+        ok: false,
+        error: 'este folio es de otro cliente: no se puede aplicar en la orden #' + orderNumber
+      });
+    }
+
     if (oaF.status === 'canceled') {
       return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' esta cancelada' });
     }
@@ -4476,7 +4528,7 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
     // Si la línea menciona ESTE folio es el descuento manual de este mismo canje.
     const rewardsAjena = lineasF.some(l => {
       const t = String((l.attributes || {}).title || '');
-      return t.toLowerCase().indexOf('filmorent rewards') === 0 && t.toUpperCase().indexOf(folio) === -1;
+      return rewardsEsLineaCredito(t) && t.toUpperCase().indexOf(folio) === -1;
     });
     if (rewardsAjena) {
       return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' ya tiene otro descuento Rewards aplicado' });
