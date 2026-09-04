@@ -141,7 +141,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.57.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.58.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -1836,7 +1836,7 @@ const REWARDS_CATALOG = [
 // que escribe el server. El camino del folio NO escribe la linea: la teclea el
 // empleado con el titulo que se le ocurra, y "Descuento Filmorent Rewards" o "Canje
 // de puntos RWD-..." pasaban invisibles, dejando apilar un segundo credito en la misma
-// orden (revision adversarial 27-ago-2026). Con el techo en $10,000 eso podia dejar la
+// orden (revision adversarial 4-sep-2026). Con el techo en $10,000 eso podia dejar la
 // orden en negativo. Basta la palabra 'rewards': en un catalogo de camaras, lentes y
 // luces ninguna linea legitima la menciona. Ante la duda conviene errar por exceso: un
 // falso positivo BLOQUEA un canje (se destraba a mano); un falso negativo regala dinero.
@@ -1852,7 +1852,7 @@ const REWARDS_CREDIT_LEVELS = [
   { id: 3, points: 500,  cap_cents: 160000 },  // $1,600
   { id: 4, points: 800,  cap_cents: 280000 },  // $2,800
   { id: 5, points: 1200, cap_cents: 450000 },  // $4,500
-  // 27-ago-2026 (Daniel): el tope de $4,500 le sabia a nada al cliente que renta
+  // 4-sep-2026 (Daniel): el tope de $4,500 le sabia a nada al cliente que renta
   // $300k al ano — el programa dejaba de moverlo. Techo nuevo $10,000, con un
   // peldano intermedio para que no haya un salto seco. El candado real no es el
   // monto sino que la orden sea >= 2x el credito: para usar $10,000 la renta
@@ -1872,7 +1872,7 @@ function rewardsFormatMXN(cents) {
 // nivel listado debe dar un crédito estrictamente mayor que el anterior.
 // avgTicketCents ya NO topa nada; se conserva el parametro para no romper llamadores.
 function rewardsCatalogFor(avgTicketCents) {
-  // 27-ago-2026 (Daniel): "no creo que deba de haber un limite del 50% del ticket
+  // 4-sep-2026 (Daniel): "no creo que deba de haber un limite del 50% del ticket
   // promedio, con el 50% del maximo de la renta es suficiente". Habia DOS topes y la
   // gente los confundia: uno recortaba la escalera segun el ticket PROMEDIO historico
   // (un cliente de ticket $1,000 nunca veia mas de $500 aunque juntara 1,200 puntos) y
@@ -4460,7 +4460,6 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
     // este endpoint solo marcaba el Ledger y NINGUNA capa validaba la orden —
     // los candados vivían solo en /pagar. Mismos checks, solo lectura.
     let creditoCents = 0;
-    let duenoFolio = '';   // customer_id del dueno del folio (candado de abajo)
     try {
       const fq = await fetch(REWARDS_SHEETS_URL + '?action=folio&folio=' + encodeURIComponent(folio),
         { redirect: 'follow' }).then(r2 => r2.json());
@@ -4476,7 +4475,6 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
         // El crédito viene en el nombre de la recompensa ("Crédito de $700 en ...")
         const m = String((fq.folio || {}).reward || '').match(/\$\s?([\d,]+)/);
         if (m) creditoCents = parseInt(m[1].replace(/,/g, ''), 10) * 100;
-        duenoFolio = String((fq.folio || {}).customer_id || '').trim();
       }
     } catch (eF) { /* si el Ledger no responde aquí, el POST de abajo lo re-checa */ }
 
@@ -4485,22 +4483,25 @@ app.post('/rewards/folio/aplicar', async (req, res) => {
     if (!orderF) return res.status(404).json({ ok: false, error: 'no existe la orden #' + orderNumber });
     const oaF = orderF.attributes || {};
 
-    // ── EL FOLIO ES DE QUIEN LO GANO ──────────────────────────────────────────
-    // Hasta hoy este endpoint recibia solo {folio, order_number} y NUNCA comparaba de
-    // quien era el folio contra de quien es la orden: era un instrumento AL PORTADOR.
-    // Combinado con que /rewards/redeem no pide sesion (basta el correo, que no es
-    // secreto), la cadena era: genero un folio con el correo de un cliente con muchos
-    // puntos, lo presento con MI orden, y salen sus puntos como descuento mio.
-    // Encontrado en la revision adversarial del 27-ago-2026 al subir el techo de
-    // $4,500 a $10,000 — el agujero ya existia, el cambio solo subia lo extraible.
-    if (duenoFolio && String(oaF.customer_id || '') !== duenoFolio) {
-      console.error('[rewards] folio ' + folio + ' de ' + duenoFolio +
-        ' intentado en orden #' + orderNumber + ' de ' + oaF.customer_id);
-      return res.status(409).json({
-        ok: false,
-        error: 'este folio es de otro cliente: no se puede aplicar en la orden #' + orderNumber
-      });
-    }
+    // ── POR QUE AQUI **NO** SE COMPARA EL DUENO DEL FOLIO CONTRA EL DE LA ORDEN ──
+    // Se agrego ese candado el 4-sep-2026 y Daniel lo mando quitar el mismo dia, con
+    // razon: ROMPIA UN CASO DE NEGOCIO REAL. En renta audiovisual quien ELIGE el
+    // proveedor es el DP o el freelance, pero quien PAGA es la productora. Por eso
+    // existe /rewards/atribuir: el DP se acredita los puntos de una orden que factura
+    // la productora. Si al usarlos exigimos que la orden sea SUYA, ese DP no puede
+    // gastar nunca sus puntos — sus rentas siempre las paga alguien mas.
+    // Ademas quedaba incoherente: /rewards/pagar y /rewards/cupon/aplicar tampoco
+    // comparan, asi que el mismo caso pasaba por el mostrador y se trababa por el folio.
+    //
+    // LO QUE SE ACEPTA A CAMBIO (decision informada, no descuido): el folio sigue siendo
+    // un instrumento AL PORTADOR. Quien tenga el codigo RWD- puede presentarlo con
+    // cualquier orden. Y como /rewards/redeem no pide sesion (basta el correo, que no es
+    // secreto), un tercero puede generar folios a nombre de otro cliente y quemarle los
+    // puntos. Lo que SI protege hoy: /rewards/folio/aplicar exige credencial de staff,
+    // asi que hace falta ser empleado para aterrizarlo.
+    // Si alguna vez se quiere cerrar sin romper al DP, la via es consultar el Ledger:
+    // dejar pasar cuando exista una atribucion que ligue al dueno del folio con el
+    // titular de esa orden. NO reponer la comparacion directa.
 
     if (oaF.status === 'canceled') {
       return res.status(409).json({ ok: false, error: 'la orden #' + orderNumber + ' esta cancelada' });
