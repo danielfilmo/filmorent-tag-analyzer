@@ -7,6 +7,10 @@ const os = require('os');
 
 const app = express();
 app.use(express.json());
+// v8.59: los formularios HTML (pantalla de preferencias de correo) y el un-clic
+// de Gmail mandan x-www-form-urlencoded. Sin esto req.body llega vacio y una
+// baja se perderia en silencio, que es exactamente el bug que vinimos a cerrar.
+app.use(express.urlencoded({ extended: false }));
 // Imagenes propias servidas publicamente para poder mandarlas por WhatsApp:
 // la URL de un adjunto tiene que ser publica. Aqui vive la de medidas del
 // Filmo Grand, que en filmorent.com solo existe en .webp (llega como link).
@@ -141,7 +145,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.58.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.59.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -2523,6 +2527,237 @@ app.post('/rewards/beacon', (req, res) => {
 // WhatsApp, que entrega un customer_id respaldado por un token firmado. En la
 // vía customer_id el token se exige SIEMPRE: el id viaja dentro del QR del
 // miembro, así que sin firma sería una llave pública a los datos de cualquiera.
+// ============================================================
+// SUSCRIPCIONES Y BAJA (v8.59, 9-sep-2026 — pedido de Daniel)
+//
+// Por que existe: hasta hoy los correos decian "responde BAJA" y NADA leia esas
+// respuestas. La palabra aparecia solo como texto; no habia lista, ni bandera,
+// ni exclusion. Se le prometio a 120 personas en agosto y no se cumplio.
+//
+// Se construye por TEMA y no todo-o-nada porque de aqui salen newsletters,
+// promos y avisos de equipo nuevo: quien no quiere promos no tiene por que
+// perder los avisos de sus puntos. Hacerlo binario obligaria a rehacerlo.
+//
+// Lo transaccional (confirmacion de orden, canje, pago, link de pago) NO es un
+// tema y NO se puede dar de baja: es respuesta a algo que el cliente pidio.
+//
+// El token NO CADUCA a proposito. Una liga de baja vencida es una promesa rota,
+// y la gente conserva correos viejos. Solo identifica el correo; no da acceso a
+// nada mas (no lee puntos, no ve ordenes) — por eso no necesita expiracion.
+// ============================================================
+const TEMAS_SUSCRIPCION = [
+  { id: 'rewards',   nombre: 'Mis puntos y mi nivel',       detalle: 'Cuando ganas puntos, cambias de nivel o algo cambia en el programa.' },
+  { id: 'promos',    nombre: 'Promociones y descuentos',    detalle: 'Ofertas por temporada y promos de equipo o estudio.' },
+  { id: 'novedades', nombre: 'Equipo nuevo en el catalogo', detalle: 'Cuando llega equipo que no teniamos.' }
+];
+const TEMAS_IDS = TEMAS_SUSCRIPCION.map(t => t.id);
+
+function bajaFirmar(email) {
+  const nodeCrypto = require('crypto');
+  const payload = Buffer.from(JSON.stringify({
+    e: String(email || '').trim().toLowerCase(), a: 'baja'
+  })).toString('base64url');
+  const firma = nodeCrypto.createHmac('sha256', REWARDS_OTP_SECRET).update('baja.' + payload).digest('base64url');
+  return payload + '.' + firma;
+}
+
+function bajaAbrir(token) {
+  const nodeCrypto = require('crypto');
+  const partes = String(token || '').split('.');
+  if (partes.length !== 2 || !partes[0] || !partes[1]) return null;
+  const esperada = nodeCrypto.createHmac('sha256', REWARDS_OTP_SECRET).update('baja.' + partes[0]).digest('base64url');
+  const a = Buffer.from(partes[1]); const b = Buffer.from(esperada);
+  if (a.length !== b.length || !nodeCrypto.timingSafeEqual(a, b)) return null;
+  let datos = null;
+  try { datos = JSON.parse(Buffer.from(partes[0], 'base64url').toString()); } catch (e) { return null; }
+  if (!datos || datos.a !== 'baja' || !datos.e) return null;
+  return datos;
+}
+
+// Cache corto: un envio en tanda consulta esto una vez por destinatario y no
+// tiene caso pegarle al Sheet 45 veces seguidas. 60 s es de sobra y una baja
+// nunca espera mas que eso para aplicar.
+let _suscripCache = { at: 0, estado: null };
+async function suscripcionesEstado(forzar) {
+  if (!forzar && _suscripCache.estado && (Date.now() - _suscripCache.at) < 60000) return _suscripCache.estado;
+  if (!REWARDS_SHEETS_URL || !process.env.REWARDS_HITOS_KEY) return _suscripCache.estado || {};
+  try {
+    const r = await fetch(REWARDS_SHEETS_URL + '?action=suscripciones&k=' +
+      encodeURIComponent(process.env.REWARDS_HITOS_KEY), { redirect: 'follow' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    if (!j || j.ok === false) throw new Error(j && j.error || 'respuesta invalida');
+    // El doGet del Ledger, ante una accion que no conoce, contesta ok:true con un
+    // {service:...} y SIN 'estado'. Leer eso como {} diria "nadie se dio de baja"
+    // y volveriamos a escribirle a quien pidio que no — falla abierto, justo lo
+    // que este modulo existe para evitar. Si no viene 'estado', es un fallo.
+    if (!j.estado || typeof j.estado !== 'object' || Array.isArray(j.estado)) {
+      throw new Error('el Ledger no conoce action=suscripciones (falta desplegarlo)');
+    }
+    _suscripCache = { at: Date.now(), estado: j.estado };
+    return _suscripCache.estado;
+  } catch (e) {
+    console.error('suscripciones: no se pudo leer el Ledger -', e.message);
+    // FALLA CERRADO: si no sabemos quien se dio de baja, el que pregunta debe
+    // asumir que NO puede mandar. Devolver {} aqui seria decir "nadie se dio de
+    // baja" y volveriamos a escribirle a quien pidio que no.
+    return null;
+  }
+}
+
+async function puedeRecibir(email, tema) {
+  const est = await suscripcionesEstado(false);
+  if (est === null) return null;                 // no se pudo verificar
+  const fila = est[String(email || '').trim().toLowerCase()];
+  if (!fila) return true;
+  return String(fila[tema] || 'alta').toLowerCase() !== 'baja';
+}
+
+async function suscripcionEscribir(email, tema, estado, origen, dispositivo) {
+  if (!REWARDS_SHEETS_URL || !process.env.REWARDS_HITOS_KEY) throw new Error('Ledger no configurado');
+  const r = await fetch(REWARDS_SHEETS_URL, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, redirect: 'follow',
+    body: JSON.stringify({
+      key: process.env.REWARDS_HITOS_KEY, tipo: 'suscripcion',
+      email: email, tema: tema, estado: estado, origen: origen || '', dispositivo: dispositivo || ''
+    })
+  });
+  const j = await r.json().catch(() => null);
+  if (!j || j.ok === false) throw new Error(j && j.error || 'HTTP ' + r.status);
+  _suscripCache.at = 0;                          // que la proxima lectura sea fresca
+  return j;
+}
+
+function bajaPagina(titulo, cuerpo) {
+  return '<!doctype html><html lang="es"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<meta name="robots" content="noindex">' +
+    '<title>' + titulo + ' — Filmorent</title><style>' +
+    'body{margin:0;background:#EFEDEC;font-family:Arial,Helvetica,sans-serif;color:#22252A;' +
+    'display:flex;justify-content:center;padding:28px 14px}' +
+    '.c{width:100%;max-width:520px;background:#fff;border-radius:6px;overflow:hidden}' +
+    '.h{padding:24px 28px 18px}.h img{display:block;width:168px;height:auto;border:0}' +
+    '.r{height:3px;background:#8C1111}.b{padding:26px 28px 30px}' +
+    'h1{font-size:21px;margin:0 0 12px;line-height:1.3}p{font-size:15px;line-height:1.6;margin:0 0 14px;color:#3A3F45}' +
+    '.t{display:flex;gap:12px;align-items:flex-start;padding:14px 0;border-top:1px solid #EEE}' +
+    '.t input{margin-top:3px;width:18px;height:18px;accent-color:#8C1111;flex:none}' +
+    '.t b{display:block;font-size:15px;color:#22252A}.t span{font-size:13px;color:#6B7076}' +
+    'button{margin-top:18px;background:#8C1111;color:#fff;border:0;border-radius:4px;' +
+    'padding:13px 26px;font-size:15px;font-weight:bold;cursor:pointer;font-family:inherit}' +
+    '.sec{margin-top:14px;background:none;color:#6B7076;padding:0;font-weight:normal;' +
+    'text-decoration:underline;font-size:13px;display:block}' +
+    '.ok{background:#E4F0E9;border-left:4px solid #2C6B45;padding:14px 16px;border-radius:0 4px 4px 0}' +
+    '.f{background:#F7F5F5;border-top:1px solid #E3E3E3;padding:16px 28px;font-size:12px;color:#8A8A8A}' +
+    '</style></head><body><div class="c">' +
+    '<div class="h"><img src="https://rewards.filmorent.com/logo-filmorent.png" alt="Filmorent"></div>' +
+    '<div class="r"></div><div class="b">' + cuerpo + '</div>' +
+    '<div class="f">Filmorent · Renta de equipo de cine y foto · Monterrey, N.L.<br>' +
+    'Las confirmaciones de tus ordenes y pagos se siguen enviando: son respuesta a algo que pediste.</div>' +
+    '</div></body></html>';
+}
+
+// GET /baja?t=...  — pantalla de preferencias (no cambia nada por si sola).
+// Un GET NUNCA da de baja: los escaneadores de correo y los proxys de imagenes
+// abren las ligas solos, y eso daria de baja a gente que jamas hizo clic.
+app.get('/baja', async (req, res) => {
+  const d = bajaAbrir(req.query.t);
+  if (!d) return res.status(400).type('html').send(bajaPagina('Liga invalida',
+    '<h1>Esta liga no es valida</h1><p>Puede estar incompleta si el correo la parti&oacute; en dos renglones. ' +
+    'Vuelve a abrirla desde el correo, o resp&oacute;ndenos y te damos de baja a mano.</p>'));
+  const est = await suscripcionesEstado(false);
+  const fila = (est && est[d.e]) || {};
+  const filas = TEMAS_SUSCRIPCION.map(t =>
+    '<label class="t"><input type="checkbox" name="tema" value="' + t.id + '"' +
+    (String(fila[t.id] || 'alta').toLowerCase() !== 'baja' ? ' checked' : '') + '>' +
+    '<span><b>' + t.nombre + '</b><span>' + t.detalle + '</span></span></label>').join('');
+  res.type('html').send(bajaPagina('Preferencias de correo',
+    '<h1>&iquest;Qu&eacute; quieres recibir?</h1>' +
+    '<p>Estos son los correos de <b>' + d.e.replace(/</g, '&lt;') + '</b>. ' +
+    'Desmarca lo que no quieras y guarda; puedes volver a esta pantalla cuando quieras.</p>' +
+    '<form method="POST" action="/rewards/preferencias">' +
+    '<input type="hidden" name="t" value="' + String(req.query.t).replace(/"/g, '') + '">' +
+    filas +
+    '<button type="submit">Guardar mis preferencias</button>' +
+    '<button type="submit" name="todo" value="1" class="sec">Darme de baja de todo</button>' +
+    '</form>'));
+});
+
+app.post('/rewards/preferencias', async (req, res) => {
+  const d = bajaAbrir((req.body || {}).t);
+  if (!d) return res.status(400).type('html').send(bajaPagina('Liga invalida',
+    '<h1>Esta liga no es valida</h1><p>Vuelve a abrirla desde el correo.</p>'));
+  const todo = !!(req.body || {}).todo;
+  let marcados = (req.body || {}).tema || [];
+  if (!Array.isArray(marcados)) marcados = [marcados];
+  marcados = todo ? [] : marcados.filter(t => TEMAS_IDS.indexOf(t) >= 0);
+  const ua = String(req.get('user-agent') || '').slice(0, 120);
+  try {
+    for (const t of TEMAS_IDS) {
+      await suscripcionEscribir(d.e, t, marcados.indexOf(t) >= 0 ? 'alta' : 'baja',
+        todo ? 'baja-total' : 'preferencias', ua);
+    }
+  } catch (e) {
+    console.error('preferencias: no se pudo guardar -', e.message);
+    return res.status(500).type('html').send(bajaPagina('No se pudo guardar',
+      '<h1>No pudimos guardar el cambio</h1><p>Fue una falla nuestra, no tuya. ' +
+      'Resp&oacute;ndenos este correo y lo aplicamos a mano — no vamos a seguir escribi&eacute;ndote.</p>'));
+  }
+  const quedan = TEMAS_SUSCRIPCION.filter(t => marcados.indexOf(t.id) >= 0);
+  res.type('html').send(bajaPagina('Listo',
+    '<h1>Listo, ya qued&oacute;</h1>' +
+    '<div class="ok">' + (quedan.length
+      ? '<p style="margin:0">Vas a seguir recibiendo: <b>' + quedan.map(t => t.nombre).join('</b>, <b>') + '</b>.</p>'
+      : '<p style="margin:0">Ya no vas a recibir correos de promoci&oacute;n de Filmorent.</p>') + '</div>' +
+    '<p>Si te arrepientes, vuelve a abrir la liga del correo y vuelve a marcar lo que quieras.</p>'));
+});
+
+// POST /baja — el "un clic" de Gmail (RFC 8058: List-Unsubscribe-Post).
+// Gmail lo llama sin abrir nada; aqui si se da de baja de todo de inmediato.
+app.post('/baja', async (req, res) => {
+  const d = bajaAbrir((req.body || {}).t || req.query.t);
+  if (!d) return res.status(400).json({ ok: false, error: 'token invalido' });
+  try {
+    for (const t of TEMAS_IDS) await suscripcionEscribir(d.e, t, 'baja', 'un-clic', 'List-Unsubscribe-Post');
+  } catch (e) {
+    console.error('baja un-clic: no se pudo guardar -', e.message);
+    return res.status(500).json({ ok: false, error: 'no se pudo guardar' });
+  }
+  res.json({ ok: true, email: d.e, estado: 'baja' });
+});
+
+// GET /rewards/suscripcion?email=&tema=&key=  — lo que consulta TODO remitente
+// antes de mandar. Si devuelve puede:false o no_verificable, NO se manda.
+app.get('/rewards/suscripcion', async (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || req.query.key !== process.env.REWARDS_HITOS_KEY) {
+    return res.status(403).json({ ok: false });
+  }
+  const email = String(req.query.email || '').trim().toLowerCase();
+  const tema = String(req.query.tema || 'rewards').trim().toLowerCase();
+  if (!email || email.indexOf('@') < 0) return res.status(400).json({ ok: false, error: 'falta email' });
+  if (TEMAS_IDS.indexOf(tema) < 0) return res.status(400).json({ ok: false, error: 'tema invalido' });
+  const puede = await puedeRecibir(email, tema);
+  if (puede === null) return res.status(503).json({ ok: false, error: 'no_verificable', puede: false });
+  res.json({ ok: true, email, tema, puede, liga_baja: '/baja?t=' + bajaFirmar(email) });
+});
+
+// GET /rewards/baja-token?email=&key=  — el remitente pide la liga para pegarla
+// en el pie y en la cabecera List-Unsubscribe.
+app.get('/rewards/baja-token', (req, res) => {
+  if (!process.env.REWARDS_HITOS_KEY || req.query.key !== process.env.REWARDS_HITOS_KEY) {
+    return res.status(403).json({ ok: false });
+  }
+  const email = String(req.query.email || '').trim().toLowerCase();
+  if (!email || email.indexOf('@') < 0) return res.status(400).json({ ok: false, error: 'falta email' });
+  const base = 'https://filmorent-tag-analyzer.onrender.com';
+  const t = bajaFirmar(email);
+  res.json({
+    ok: true, email, token: t,
+    url: base + '/baja?t=' + t,
+    list_unsubscribe: '<' + base + '/baja?t=' + t + '>',
+    list_unsubscribe_post: 'List-Unsubscribe=One-Click'
+  });
+});
+
 app.get('/rewards/member', async (req, res) => {
   const email = String(req.query.email || '').trim().toLowerCase();
   const porId = String(req.query.customer_id || '').trim();
