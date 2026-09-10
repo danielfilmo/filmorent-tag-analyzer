@@ -145,7 +145,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.59.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.60.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -5067,7 +5067,10 @@ async function draftFindProduct(query, contexto) {
             lista.map(function (c, i) { return (i + 1) + '. ' + c.attributes.name; }).join('\n') +
             '\n\nResponde SOLO con el numero del que corresponde. Si ninguno corresponde con ' +
             'CERTEZA, responde 0. Ante la duda responde 0: es mejor que un humano lo agregue a ' +
-            'mano que poner el equipo equivocado en una orden.'
+            'mano que poner el equipo equivocado en una orden. Si en la lista hay DOS VERSIONES del mismo ' +
+            'producto (GM y GM II, Mark I y Mark II, EF y RF, 60 y 120) y el cliente no dijo cual, responde 0: ' +
+            'esa eleccion la hace un humano o el AI con el historial del cliente (10-sep-2026, caso Carlos Alcala: ' +
+            'se puso el GM normal cuando el cliente siempre renta el GM II).'
         }]
       });
       const n = parseInt((claudeText(resp).match(/\d+/) || ['0'])[0], 10);
@@ -5385,7 +5388,7 @@ app.post('/webhook/draft-order', async (req, res) => {
       'Regresa UNICAMENTE un objeto JSON valido, sin markdown ni texto extra:\n' +
       '{"solicitudes":[{' +
       '"equipos":[{"descripcion":"nombre CORTO, MAXIMO 5 palabras, SIN parentesis (los detalles van en notas), ej: Sony FX3, DJI Mini 4 Pro, luz Amaran 200x. Para estudios usa exactamente: Estudio Filmo Grand, Estudio Filmo Pocket o Estudio Podcast","cantidad":1}],' +
-      '"fecha_inicio":"YYYY-MM-DD dia que EMPIEZA a usar, o null",' +
+      '"fecha_inicio":"YYYY-MM-DD dia que EMPIEZA a usar, o null (si el cliente LISTA dias, por ejemplo 25, 26 y 27, son dias INCLUSIVOS de uso: empieza el 25 y regresa el 28; nunca cuentes 2 dias por 3 listados — caso Carlos Alcala 10-sep-2026)",' +
       '"fecha_regreso":"YYYY-MM-DD dia que REGRESA (si solo dijo hasta cuando lo USA, el regreso es la manana del dia siguiente), o null",' +
       '"hora_inicio":"HH:MM SOLO si dijo a que hora recoge, si no null",' +
       '"hora_regreso":"HH:MM SOLO si dijo a que hora regresa, si no null"' +
@@ -5965,7 +5968,8 @@ const INFO_ESTUDIOS = {
       // NO mencionar que esta en el tercer piso: es un dato logistico que solo
       // desincentiva la venta (Daniel, 7-ago). Se resuelve al agendar.
       { t: 'FILMO POCKET \u2014 el compacto. Ideal para photoshoots, podcast, contenido y videos ' +
-           'musicales de escala chica. Sale en $700 por hora.\nhttps://filmorent.com/estudio-filmo-pocket/' },
+           'musicales de escala chica. Promo: 2 horas por $1,000 con 3 luces incluidas (hora extra $500), ' +
+           'o $700 por hora con bono de equipo del 100%.\nhttps://filmorent.com/estudio-filmo-pocket/' },
       { i: 'https://filmorent.com/wp-content/uploads/estudio-pocket-reservacion.jpg' },
       { t: 'Estas son sus medidas:' },
       { i: 'https://filmorent.com/wp-content/uploads/estudio-pocket-medidas.jpg' }
@@ -6011,7 +6015,14 @@ app.post('/webhook/enviar-info', async (req, res) => {
     // claro, se mandan LOS DOS y que el cliente elija.
     const pidePocket = /pocket|chico|peque|podcast/.test(texto);
     const pideGrand = /grand|grande|ciclorama|cocina/.test(texto);
-    const cuales = (pidePocket && !pideGrand) ? ['pocket']
+    // 10-sep-2026 (Daniel): el Shortcut puede decir CUAL estudio mandar ("cual": pocket | grand | ambos) — para
+    // tener un Shortcut por estudio (o uno con lista) y para que el AI lo dispare con la opcion correcta.
+    // Sin "cual" se sigue adivinando por el texto del cliente como antes.
+    const cualPedido = String((req.body && (req.body.cual || req.body.estudio || req.body.data?.cual)) || '').toLowerCase();
+    const cuales = /pocket/.test(cualPedido) ? ['pocket']
+      : /grand/.test(cualPedido) ? ['grand']
+      : /ambos|los dos|both|todos/.test(cualPedido) ? ['grand', 'pocket']
+      : (pidePocket && !pideGrand) ? ['pocket']
       : (pideGrand && !pidePocket) ? ['grand']
       : ['grand', 'pocket'];
 
@@ -6041,16 +6052,30 @@ app.post('/webhook/enviar-info', async (req, res) => {
         }
       }
     }
-    await respondioEnviar(contactId, canal, {
-      message: { type: 'text', text: '\u00bfQu\u00e9 d\u00eda y de qu\u00e9 hora a qu\u00e9 hora lo ocupas? ' +
-        'Con eso te checo disponibilidad y te paso el total.' }
-    });
+    // 8-sep-2026 (Alfredo, caso Mich 530664139): la pregunta fija de cierre le pedia el dia a una
+    // clienta que ya habia escrito "para este domingo" y se sintio ignorada. Se pregunta SOLO lo que
+    // falta, repitiendo lo que ya dijo. `texto` son unicamente los mensajes del cliente.
+    const DIAS = 'lunes|martes|mi\u00e9rcoles|miercoles|jueves|viernes|s\u00e1bado|sabado|domingo';
+    const mDia = texto.match(new RegExp('\\b(hoy|ma\u00f1ana|manana|pasado ma\u00f1ana|(?:este|el|para el|para este) (?:' + DIAS + ')|' + DIAS +
+      '|\\d{1,2}\\s*(?:de\\s+)?(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)[a-z]*|\\d{1,2}/\\d{1,2})\\b'));
+    const mReloj = texto.match(/\b(\d{1,2}\s*(?:am|pm|hrs?)\b|\d{1,2}:\d{2}|de\s+\d{1,2}\s+a\s+\d{1,2}(?:\s*(?:am|pm|hrs?))?)/);
+    const mDur = texto.match(/\b((?:\d+|una|dos|tres|cuatro|cinco|seis|ocho|media)\s*horas?)\b/);
+    const dia = mDia ? mDia[1].replace(/^(para el|para este|el|este) /, function (m0) { return m0 === 'el ' ? 'el ' : 'este '; }) : null;
+    const reloj = mReloj ? mReloj[1] : null;
+    const dur = mDur ? mDur[1] : null;
+    const cierre = (dia && reloj) ? 'Para ' + dia + ' a esa hora te checo disponibilidad y te paso el total en un momento.'
+      : (dia && dur) ? 'Para ' + dia + ' (' + dur + '), \u00bfa qu\u00e9 hora te gustar\u00eda empezar? Con eso te checo disponibilidad y te paso el total.'
+      : dia ? 'Para ' + dia + ', \u00bfde qu\u00e9 hora a qu\u00e9 hora lo ocupas? Con eso te checo disponibilidad y te paso el total.'
+      : (reloj || dur) ? '\u00bfQu\u00e9 d\u00eda lo ocupas? Con eso te checo disponibilidad y te paso el total.'
+      : '\u00bfQu\u00e9 d\u00eda y de qu\u00e9 hora a qu\u00e9 hora lo ocupas? Con eso te checo disponibilidad y te paso el total.';
+    const yaDijo = [dia, reloj || dur].filter(Boolean).join(', ');
+    await respondioEnviar(contactId, canal, { message: { type: 'text', text: cierre } });
     await draftPostComment(contactId,
       '\ud83d\udcf8 Le mande info de: ' + cuales.map(function (c) { return INFO_ESTUDIOS[c].titulo; }).join(' y ') +
       ' (' + enviadas.length + ' imagenes)' +
       (cuales.length === 2 ? ' \u2014 no dijo cual queria, asi que fueron los dos.' : '.') +
       (omitidas.length ? ' NO se pudieron mandar: ' + omitidas.join(', ') + '.' : '') +
-      ' Falta que confirme dia y horario.');
+      (yaDijo ? ' Ya dijo: ' + yaDijo + '.' : ' Falta que confirme dia y horario.'));
     console.log('[enviar-info] ' + cuales.join('+') + ' -> contacto ' + contactId +
       ' (' + enviadas.length + ' imagenes, ' + omitidas.length + ' omitidas)');
     return res.json({ ok: true, estudios: cuales, imagenes: enviadas, omitidas: omitidas });
