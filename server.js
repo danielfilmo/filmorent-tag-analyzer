@@ -48,17 +48,27 @@ app.get('/modo-seco', (req, res) => res.json({ seco: enModoSeco(), hasta: modoSe
 // lee de /health y avisa a $40 / $50). Precios USD por MTok: sonnet in 3/out 15, opus in 15/out 75,
 // haiku in 1/out 5 (aprox conservadora; cache write cuenta como in).
 const API_PRECIOS = { sonnet: [3, 15], opus: [15, 75], haiku: [1, 5] };
-let apiMes = { mes: new Date().toISOString().slice(0, 7), usd: 0 };
-try { const j = JSON.parse(require('fs').readFileSync('/tmp/api_mes.json', 'utf8')); if (j.mes === apiMes.mes) apiMes = j; } catch (e) {}
+// OJO (14-sep-2026): /tmp se borra en CADA deploy de Render, asi que este contador
+// NO es el gasto del mes, es el gasto DESDE EL ULTIMO REINICIO. Se guarda 'desde'
+// para que /health lo diga y nadie vuelva a leer $13 creyendo que ese es el mes
+// (Anthropic ya habia cobrado >$25 ese dia). La cifra fiscal es la de Anthropic.
+let apiMes = { mes: new Date().toISOString().slice(0, 7), usd: 0, desde: new Date().toISOString(), por: {} };
+try {
+  const j = JSON.parse(require('fs').readFileSync('/tmp/api_mes.json', 'utf8'));
+  if (j.mes === apiMes.mes) apiMes = Object.assign({ desde: apiMes.desde, por: {} }, j);
+} catch (e) {}
 function apiTrack(model, usage) {
   try {
     const mesAhora = new Date().toISOString().slice(0, 7);
-    if (apiMes.mes !== mesAhora) apiMes = { mes: mesAhora, usd: 0 };
+    if (apiMes.mes !== mesAhora) apiMes = { mes: mesAhora, usd: 0, desde: new Date().toISOString(), por: {} };
+    if (!apiMes.por) apiMes.por = {};
     const fam = /opus/i.test(model || '') ? 'opus' : (/haiku/i.test(model || '') ? 'haiku' : 'sonnet');
     const p = API_PRECIOS[fam];
     const inp = (usage && ((usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0) * 0.1)) || 0;
     const out = (usage && usage.output_tokens) || 0;
-    apiMes.usd += (inp * p[0] + out * p[1]) / 1e6;
+    const costo = (inp * p[0] + out * p[1]) / 1e6;
+    apiMes.usd += costo;
+    apiMes.por[fam] = Math.round(((apiMes.por[fam] || 0) + costo) * 10000) / 10000;
     require('fs').writeFile('/tmp/api_mes.json', JSON.stringify(apiMes), function () {});
   } catch (e) {}
 }
@@ -69,6 +79,65 @@ anthropic.messages.create = async function (params) {
   return r;
 };
 function apiPasado(limite) { return apiMes.usd >= limite; }
+
+// ---------------------------------------------------------------------------
+// RELEVO DE CLAUDE (14-sep-2026). Decision de Daniel 31-ago: "que no use API,
+// sino cuenta de claude code". El prompt grande del copiloto se ENCOLA aqui y
+// la Mac (copiloto-worker.mjs, launchd cada 60s) lo corre con `claude -p` del
+// plan Max, sin costo de API. Si la Mac esta apagada o frenada, a los
+// COLA_ESPERA_MS se cae a la API sola (respaldo) y la orden igual se arma.
+// El worker existia desde el 31-ago pero este endpoint nunca se desplego: llevaba
+// 2,862 llamadas al dia recibiendo 404 mientras el copiloto seguia cobrando Opus.
+// ---------------------------------------------------------------------------
+const COLA_ESPERA_MS = 3 * 60 * 1000;
+const colaClaude = new Map();   // id -> { prompt, tomado, resolver, creado }
+let colaSeq = 0;
+
+// Corre el prompt en la Mac; si no contesta a tiempo, null (el que llama cae a la API).
+function claudePorCola(prompt) {
+  if (!REWARDS_HITOS_KEY) return Promise.resolve(null);   // sin llave no hay worker
+  const id = ++colaSeq;
+  return new Promise(function (resolve) {
+    const item = { prompt: prompt, tomado: 0, resolver: resolve, creado: Date.now() };
+    colaClaude.set(id, item);
+    setTimeout(function () {
+      if (colaClaude.has(id)) {
+        colaClaude.delete(id);
+        console.log('[cola_claude] #' + id + ' sin respuesta de la Mac en 3 min — caigo a la API');
+        resolve(null);
+      }
+    }, COLA_ESPERA_MS);
+  });
+}
+
+// El worker pide trabajo. Solo entrega lo que nadie tomo en el ultimo minuto
+// (si la Mac se muere a medias, otro intento lo vuelve a tomar).
+app.get('/cola_claude', function (req, res) {
+  if (!REWARDS_HITOS_KEY || req.query.key !== REWARDS_HITOS_KEY) return res.status(403).json({ error: 'key' });
+  const ahora = Date.now();
+  const items = [];
+  for (const [id, it] of colaClaude) {
+    if (it.tomado && ahora - it.tomado < 60000) continue;
+    it.tomado = ahora;
+    items.push({ id: id, prompt: it.prompt });
+    if (items.length >= 4) break;
+  }
+  res.json({ items: items });
+});
+
+// El worker regresa el resultado.
+app.post('/cola_claude/done', function (req, res) {
+  const b = req.body || {};
+  if (!REWARDS_HITOS_KEY || b.key !== REWARDS_HITOS_KEY) return res.status(403).json({ error: 'key' });
+  const it = colaClaude.get(Number(b.id));
+  if (!it) return res.json({ ok: true, nota: 'ya no estaba en la cola (timeout o duplicado)' });
+  colaClaude.delete(Number(b.id));
+  const seg = ((Date.now() - it.creado) / 1000).toFixed(0);
+  if (b.error) { console.log('[cola_claude] #' + b.id + ' la Mac fallo (' + seg + 's): ' + String(b.error).slice(0, 120)); it.resolver(null); }
+  else { console.log('[cola_claude] #' + b.id + ' resuelto por la Mac en ' + seg + 's (sin costo de API)'); it.resolver(String(b.out || '')); }
+  res.json({ ok: true });
+});
+
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
 // Extrae de forma robusta el texto de una respuesta de Claude. OJO: claude-sonnet-5 puede
@@ -145,7 +214,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.60.0', api_mes_usd: Math.round(apiMes.usd * 100) / 100, voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.61.0', api_usd_desde_reinicio: Math.round(apiMes.usd * 100) / 100, api_desde: apiMes.desde, api_por_modelo: apiMes.por || {}, api_nota: 'NO es el gasto del mes: /tmp se borra en cada deploy. El real esta en la consola de Anthropic.', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -5057,7 +5126,11 @@ async function draftFindProduct(query, contexto) {
     const lista = candidatos.slice(0, 40);
     try {
       const resp = await anthropic.messages.create({
-        model: 'claude-opus-5',
+        // Sonnet, no Opus (14-sep-2026): esto es un desempate corto ("cual de estos 40
+        // productos es") que se llama UNA VEZ POR PRODUCTO — con Opus una orden de 10
+        // equipos costaba 10 llamadas al modelo mas caro. No se baja a Haiku porque
+        // equivocarse aqui mete el equipo incorrecto en una orden real.
+        model: 'claude-sonnet-5',
         max_tokens: 300,
         thinking: { type: 'disabled' },
         messages: [{
@@ -5442,6 +5515,18 @@ app.post('/webhook/draft-order', async (req, res) => {
       // adaptativo se comia el presupuesto y truncaba el JSON. Esta extraccion
       // no necesita pensar, asi que en el 1er intento se apaga. El 2o intento va
       // SIN el parametro: si algun dia el modelo no lo acepta, se auto-repara.
+      // Primero la Mac con el plan Max (sin costo). Solo si no contesta, la API.
+      if (intento === 1) {
+        const porMac = await claudePorCola(
+          userContent + '\n\nResponde UNICAMENTE con el JSON pedido, sin explicaciones ni ```.');
+        if (porMac) {
+          ultimoRaw = porMac;
+          console.log('[draft-order] intento 1 resuelto por la Mac (plan Max, $0 de API) chars=' + porMac.length);
+          ext = parseExt(ultimoRaw);
+          if (ext) break;
+          console.log('[draft-order] lo de la Mac no era JSON valido — sigo con la API');
+        }
+      }
       const params = { model: 'claude-opus-5', messages: [{ role: 'user', content: userContent }] }; // Opus: decision de Daniel 26-ago (copiloto muy capaz)
       if (intento === 1) {
         params.max_tokens = 2000;
