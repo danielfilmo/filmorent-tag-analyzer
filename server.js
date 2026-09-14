@@ -95,7 +95,7 @@ let colaSeq = 0;
 
 // Corre el prompt en la Mac; si no contesta a tiempo, null (el que llama cae a la API).
 function claudePorCola(prompt) {
-  if (!REWARDS_HITOS_KEY) return Promise.resolve(null);   // sin llave no hay worker
+  if (!process.env.REWARDS_HITOS_KEY) return Promise.resolve(null);   // sin llave no hay worker
   const id = ++colaSeq;
   return new Promise(function (resolve) {
     const item = { prompt: prompt, tomado: 0, resolver: resolve, creado: Date.now() };
@@ -113,7 +113,7 @@ function claudePorCola(prompt) {
 // El worker pide trabajo. Solo entrega lo que nadie tomo en el ultimo minuto
 // (si la Mac se muere a medias, otro intento lo vuelve a tomar).
 app.get('/cola_claude', function (req, res) {
-  if (!REWARDS_HITOS_KEY || req.query.key !== REWARDS_HITOS_KEY) return res.status(403).json({ error: 'key' });
+  if (!process.env.REWARDS_HITOS_KEY || req.query.key !== process.env.REWARDS_HITOS_KEY) return res.status(403).json({ error: 'key' });
   const ahora = Date.now();
   const items = [];
   for (const [id, it] of colaClaude) {
@@ -128,7 +128,7 @@ app.get('/cola_claude', function (req, res) {
 // El worker regresa el resultado.
 app.post('/cola_claude/done', function (req, res) {
   const b = req.body || {};
-  if (!REWARDS_HITOS_KEY || b.key !== REWARDS_HITOS_KEY) return res.status(403).json({ error: 'key' });
+  if (!process.env.REWARDS_HITOS_KEY || b.key !== process.env.REWARDS_HITOS_KEY) return res.status(403).json({ error: 'key' });
   const it = colaClaude.get(Number(b.id));
   if (!it) return res.json({ ok: true, nota: 'ya no estaba en la cola (timeout o duplicado)' });
   colaClaude.delete(Number(b.id));
@@ -214,7 +214,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.61.0', api_usd_desde_reinicio: Math.round(apiMes.usd * 100) / 100, api_desde: apiMes.desde, api_por_modelo: apiMes.por || {}, api_nota: 'NO es el gasto del mes: /tmp se borra en cada deploy. El real esta en la consola de Anthropic.', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.61.1', api_usd_desde_reinicio: Math.round(apiMes.usd * 100) / 100, api_desde: apiMes.desde, api_por_modelo: apiMes.por || {}, api_nota: 'NO es el gasto del mes: /tmp se borra en cada deploy. El real esta en la consola de Anthropic.', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
