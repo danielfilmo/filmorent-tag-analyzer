@@ -214,7 +214,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.61.1', api_usd_desde_reinicio: Math.round(apiMes.usd * 100) / 100, api_desde: apiMes.desde, api_por_modelo: apiMes.por || {}, api_nota: 'NO es el gasto del mes: /tmp se borra en cada deploy. El real esta en la consola de Anthropic.', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.62.0', api_usd_desde_reinicio: Math.round(apiMes.usd * 100) / 100, api_desde: apiMes.desde, api_por_modelo: apiMes.por || {}, api_nota: 'NO es el gasto del mes: /tmp se borra en cada deploy. El real esta en la consola de Anthropic.', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -4748,6 +4748,108 @@ app.get('/rewards/folio', async (req, res) => {
 // Para staff (F1.5): marca un folio de canje como aplicado a una orden.
 // POST al Apps Script {tipo:'aplicar', folio, order_number, staff_name};
 // el .gs responde {ok, updated:bool, estado_previo}.
+// ── POST /rewards/canje/cancelar  {folio, motivo?, forzar?} ──────────────────
+// Devuelve al cliente los puntos de un canje que al final no se va a usar.
+//
+// POR QUÉ EXISTE (18-sep-2026): Booqable y el Ledger no se hablan. Cancelar la orden
+// en Booqable NO devuelve los puntos: el canje se queda 'aplicado' y el saldo del
+// cliente sigue descontado aunque nunca haya usado el descuento. El Ledger sí sabe
+// deshacerlo (tipo canje_cancelar) pero NADIE podía invocarlo — no había endpoint ni
+// botón. Lo destapó Barush el 14-sep preguntando qué pasaba con los $250 de la orden
+// 11001; la pregunta se quedó 4 días sin respuesta y el lente siguió apartado.
+//
+// EL CANDADO QUE IMPORTA: no se devuelven los puntos mientras el descuento SIGA VIVO
+// en una orden activa. Si no, el cliente se queda con las dos cosas — el descuento
+// aplicado y sus puntos de vuelta. Por eso se revisa Booqable antes de tocar el Ledger.
+app.post('/rewards/canje/cancelar', async (req, res) => {
+  const body = req.body || {};
+  const staffCn = await rewardsStaffFrom(req);
+  if (rewardsStaffDenied(res, staffCn)) return;
+  const folio = String(body.folio || '').trim().toUpperCase();
+  if (folio.indexOf('RWD-') !== 0 || folio.length < 6) {
+    return res.status(400).json({ ok: false, error: 'folio invalido (esperado RWD-...)' });
+  }
+  if (!REWARDS_SHEETS_URL) return res.status(503).json({ ok: false, error: 'devolucion de puntos deshabilitada (Ledger no configurado)' });
+  try {
+    // 1) el canje: existe, y en qué estado está
+    const fq = await fetch(REWARDS_SHEETS_URL + '?action=folio&folio=' + encodeURIComponent(folio),
+      { redirect: 'follow' }).then(r2 => r2.json()).catch(() => null);
+    if (!fq || fq.ok === false) return res.status(502).json({ ok: false, error: 'no se pudo leer el Ledger, intenta de nuevo' });
+    if (!fq.found) return res.status(404).json({ ok: false, error: 'folio no encontrado' });
+    const estadoPrev = String((fq.folio || {}).estado || 'pendiente').toLowerCase();
+    if (estadoPrev === 'cancelado') {
+      return res.status(409).json({ ok: false, error: 'ese canje ya estaba cancelado; los puntos ya se le devolvieron' });
+    }
+    const ordenDelFolio = String((fq.folio || {}).orden_aplicada || '').trim();
+
+    // 2) si se aplicó a una orden, esa orden NO puede seguir usando el descuento
+    let aviso = '';
+    if (ordenDelFolio) {
+      const odC = await booqableGet('/orders?filter[number]=' + encodeURIComponent(ordenDelFolio) + '&page[size]=2');
+      const ordC = (odC.data || [])[0];
+      if (ordC) {
+        const oaC = ordC.attributes || {};
+        const ldC = await booqableGet('/lines?filter[order_id]=' + ordC.id + '&page[size]=100');
+        const lineaViva = (ldC.data || []).some(l => {
+          const la = l.attributes || {};
+          return !la.archived && rewardsEsLineaCredito(la.title);
+        });
+        const ordenViva = oaC.status !== 'canceled';
+        if (ordenViva && lineaViva && !body.forzar) {
+          return res.status(409).json({
+            ok: false,
+            requiere_forzar: true,
+            error: 'la orden #' + ordenDelFolio + ' sigue activa (' + oaC.status + ') y todavia trae el descuento aplicado. ' +
+                   'Si devuelves los puntos ahora, el cliente se queda con las dos cosas. ' +
+                   'Cancela la orden en Booqable (o quita la linea) y vuelve a intentar.'
+          });
+        }
+        if (!ordenViva) aviso = 'la orden #' + ordenDelFolio + ' esta cancelada';
+        else if (!lineaViva) aviso = 'la orden #' + ordenDelFolio + ' ya no trae la linea del descuento';
+      } else {
+        aviso = 'no encontre la orden #' + ordenDelFolio + ' en Booqable';
+      }
+    }
+
+    // 3) devolver los puntos. forzar:true es obligatorio si el canje ya estaba
+    //    'aplicado' — el .gs lo exige a proposito para que nadie regale un
+    //    descuento que si se cobro.
+    const out = await rewardsLedgerCall({
+      tipo: 'canje_cancelar', folio: folio,
+      forzar: (estadoPrev === 'aplicado') ? true : !!body.forzar,
+      autorizado_por: staffCn,
+      motivo: String(body.motivo || '').slice(0, 200) || 'orden cancelada, el cliente no uso el descuento'
+    });
+    if (!out || out.ok === false) {
+      // El .gs desplegado puede ser anterior a v13 (el que trae canje_cancelar). Si es
+      // eso, el staff no tiene por que leer "tipo desconocido": se le dice que falta un
+      // paso del lado de Daniel, no que se equivoco el.
+      const errLedger = String((out && out.error) || '');
+      if (/tipo desconocido/i.test(errLedger)) {
+        console.error('[rewards] canje/cancelar: el Ledger desplegado no soporta canje_cancelar (falta subir el .gs v13)');
+        return res.status(503).json({
+          ok: false,
+          error: 'la devolucion de puntos todavia no esta activa del lado del Ledger; avisale a Daniel y se destraba en minutos'
+        });
+      }
+      return res.status(502).json({ ok: false, error: errLedger || 'el Ledger no pudo cancelar el canje' });
+    }
+    if (out.updated === false) {
+      return res.status(409).json({ ok: false, error: 'el canje ya estaba en estado ' + (out.estado_previo || '?') });
+    }
+    console.log('[rewards] canje ' + folio + ' CANCELADO por ' + staffCn +
+      ' (+' + (out.puntos_devueltos || 0) + ' pts de vuelta)' + (aviso ? ' — ' + aviso : ''));
+    return res.json({
+      ok: true, folio: folio, estado_previo: out.estado_previo,
+      puntos_devueltos: out.puntos_devueltos || 0,
+      orden: ordenDelFolio || null, nota: aviso || null
+    });
+  } catch (e) {
+    console.error('[rewards] canje/cancelar error: ' + e.message);
+    return res.status(502).json({ ok: false, error: 'error devolviendo los puntos, intenta de nuevo' });
+  }
+});
+
 app.post('/rewards/folio/aplicar', async (req, res) => {
   const body = req.body || {};
   const staffAplicar = await rewardsStaffFrom(req);
