@@ -214,7 +214,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.62.0', api_usd_desde_reinicio: Math.round(apiMes.usd * 100) / 100, api_desde: apiMes.desde, api_por_modelo: apiMes.por || {}, api_nota: 'NO es el gasto del mes: /tmp se borra en cada deploy. El real esta en la consola de Anthropic.', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.63.0', api_usd_desde_reinicio: Math.round(apiMes.usd * 100) / 100, api_desde: apiMes.desde, api_por_modelo: apiMes.por || {}, api_nota: 'NO es el gasto del mes: /tmp se borra en cada deploy. El real esta en la consola de Anthropic.', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true }));
 
 function extractContactId(body) {
   return (
@@ -5080,7 +5080,11 @@ function draftFamilia(textos) {
 async function draftFindProduct(query, contexto) {
   query = String(query || '').replace(/\([^)]*\)/g, ' ').replace(/["']/g, ' ');
   const norm = function (s) {
-    return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    // MATCH_V863 (19/21-sep-2026, caso Ana Gabriela): el catalogo trae "RF 70-200mm f2.8L" sin
+    // espacio antes de la L de serie, y "f2.8" nunca matcheaba como palabra completa. Se separa
+    // el patron apertura f+numero+L ("f2.8l" -> "f2.8 l", "f/4l" -> "f/4 l"); no toca "fx3" ni "a7s".
+    return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/(f\/?\d+(?:\.\d+)?)l(?=$|[^a-z0-9])/g, '$1 l');
   };
   const contienePalabra = function (texto, w) {
     const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -5179,6 +5183,20 @@ async function draftFindProduct(query, contexto) {
     // danado o de uso especifico). Solo se usa si NO hay nada publicado.
     const enTienda = exactos.filter(function (x) { return x.attributes.show_in_store !== false; });
     if (enTienda.length) exactos = enTienda;
+    // MATCH_V863: el cliente pidio un MODELO concreto (70-200mm, f2.8, fx3...) pero en este nivel ya
+    // solo se comparte marca+montura ("canon"+"rf") y ningun candidato trae el modelo en el nombre.
+    // Asi salio 2 veces "Kit Camara Canon R5 Mark II" en vez del lente RF 70-200. No se acepta:
+    // sigue el siguiente nivel y, si no hay, cae al desempate IA (que responde 0 si no hay certeza).
+    if (modelos.length) {
+      const trae = function (x, lista) {
+        const n = norm(x.attributes.name).replace(/\s+/g, '');
+        return lista.every(function (m) { return n.indexOf(norm(m).replace(/\s+/g, '')) !== -1; });
+      };
+      let conModelo = exactos.filter(function (x) { return trae(x, modelos); });          // todos los modelos
+      if (!conModelo.length) conModelo = exactos.filter(function (x) { return modelos.some(function (m) { return trae(x, [m]); }); });
+      if (!conModelo.length) continue;
+      exactos = conModelo;   // el KIT sigue ganando, pero solo entre lo que SI trae el modelo pedido
+    }
     if (esGenerico && exactos.length > 1) {
       // Antes de rendirse: ¿que pone el equipo de verdad en estos casos?
       // (censo de 31,690 ordenes de Booqable). Si el historial es claro se usa
