@@ -214,7 +214,7 @@ function getAgentRole(name) {
 }
 
 // Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.63.1', api_usd_desde_reinicio: Math.round(apiMes.usd * 100) / 100, api_desde: apiMes.desde, api_por_modelo: apiMes.por || {}, api_nota: 'NO es el gasto del mes: /tmp se borra en cada deploy. El real esta en la consola de Anthropic.', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true, feedback: true }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: 'v8.64.0', api_usd_desde_reinicio: Math.round(apiMes.usd * 100) / 100, api_desde: apiMes.desde, api_por_modelo: apiMes.por || {}, api_nota: 'NO es el gasto del mes: /tmp se borra en cada deploy. El real esta en la consola de Anthropic.', voz: false, lineaInstantanea: true, ordenes: true, colaAnalisis: true, actividad: true, whisper: !!openai, autoSummary: true, rewards: !!BOOQABLE_API_KEY, puentePdf: true, staffGoogle: !!REWARDS_GOOGLE_CLIENT_ID, staffProtected: REWARDS_STAFF_PROTECTED, atribuciones: true, feedback: true }));
 
 function extractContactId(body) {
   return (
@@ -6282,7 +6282,9 @@ const INFO_ESTUDIOS = {
            'o $700 por hora con bono de equipo del 100%.\nhttps://filmorent.com/estudio-filmo-pocket/' },
       { i: 'https://filmorent.com/wp-content/uploads/estudio-pocket-reservacion.jpg' },
       { t: 'Estas son sus medidas:' },
-      { i: 'https://filmorent.com/wp-content/uploads/estudio-pocket-medidas.jpg' }
+      { i: 'https://filmorent.com/wp-content/uploads/estudio-pocket-medidas.jpg' },
+      { t: 'Y as\u00ed se ve su \u00e1rea de maquillaje y vestidor:' },
+      { i: 'https://filmorent-tag-analyzer.onrender.com/assets/estudio-pocket-maquillaje.jpg' }
     ]
   }
 };
